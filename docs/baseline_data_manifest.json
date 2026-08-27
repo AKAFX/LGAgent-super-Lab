@@ -1,0 +1,62 @@
+{
+  "format_version": 1,
+  "datasets": {
+    "data/Ability_merged.jsonl": {
+      "sha256": "11ee25e64bc39cfd611694914f6354415ab0ea6e042336c3b61130f87f090302",
+      "bytes": 10270786,
+      "samples": 8385,
+      "schema": {
+        "golden_answers": [
+          "array"
+        ],
+        "id": [
+          "integer"
+        ],
+        "meta_data": [
+          "object"
+        ],
+        "question": [
+          "string"
+        ]
+      }
+    },
+    "data/CAIL2022.jsonl": {
+      "sha256": "0702750e6995100854105d5fa6a2da08459f91564013f54ac53f87807ff8a96e",
+      "bytes": 243632,
+      "samples": 300,
+      "schema": {
+        "golden_answers": [
+          "array"
+        ],
+        "id": [
+          "integer"
+        ],
+        "meta_data": [
+          "object"
+        ],
+        "question": [
+          "string"
+        ]
+      }
+    },
+    "data/lawbench_merged.jsonl": {
+      "sha256": "2e87b4034f04ad490404d001523258104e43ca49de564a68c8ff033f9655d268",
+      "bytes": 15147272,
+      "samples": 9989,
+      "schema": {
+        "golden_answers": [
+          "array"
+        ],
+        "id": [
+          "integer"
+        ],
+        "meta_data": [
+          "object"
+        ],
+        "question": [
+          "string"
+        ]
+      }
+    }
+  }
+}

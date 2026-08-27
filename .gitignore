@@ -43,6 +43,7 @@ data/**/*.xlsx
 
 # Local IDE and virtual environments
 .venv/
+.tools/
 
 # Example configuration files
 examples/parameter/*.yaml

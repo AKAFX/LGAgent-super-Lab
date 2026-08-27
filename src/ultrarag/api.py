@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 from types import SimpleNamespace
 from typing import List
 
@@ -144,13 +145,27 @@ def initialize(servers: list[str], server_root: str, log_level="info"):
         if not os.path.exists(path):
             raise ValueError(f"Server path {path} does not exist!")
         mcp_cfg["mcpServers"][server_name] = {
-            "command": "python",
+            "command": sys.executable,
             "args": [path],
             "env": os.environ.copy(),
         }
 
     _client = Client(mcp_cfg)
     _servers = servers
+
+
+async def shutdown() -> None:
+    """Close the active MCP client and release its subprocesses."""
+    global _client, _servers
+    if _client is not None:
+        try:
+            _ = _client.session
+        except RuntimeError:
+            pass
+        else:
+            await _client.__aexit__(None, None, None)
+    _client = None
+    _servers = None
 
 
 ToolCall = _Router()

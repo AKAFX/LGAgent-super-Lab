@@ -10,49 +10,50 @@ readme = "README.md"
 requires-python = ">=3.11, <3.13"
 dependencies = [
     "fastmcp==2.11.3",
-    "pandas",
-    "Jinja2",
-    "openai",
-    "httpx[socks]",
-    "python-dotenv",
-    "PyYAML",
-    "tqdm",
-    "requests",
-    "orjson",
-    "tabulate",
-    "aiohttp",
-    "pillow",
-    "rouge-score",
-    "pytrec-eval-terrier",
+    "Flask==3.1.1",
+    "pandas==2.3.1",
+    "Jinja2==3.1.6",
+    "openai==1.109.1",
+    "httpx[socks]==0.28.1",
+    "python-dotenv==1.1.1",
+    "PyYAML==6.0.2",
+    "tqdm==4.67.1",
+    "requests==2.32.4",
+    "orjson==3.11.3",
+    "tabulate==0.9.0",
+    "aiohttp==3.12.15",
+    "pillow==11.3.0",
+    "rouge-score==0.1.2",
+    "pytrec-eval-terrier==0.5.10",
 ]
 
 [project.optional-dependencies]
 retriever = [
-    "infinity-emb",
-    "sentence-transformers",
-    "openai",
-    "bm25s",
-    "faiss-gpu-cu12",
-    "exa_py",
-    "tavily-python",
+    "infinity-emb==0.0.76",
+    "sentence-transformers==5.1.0",
+    "openai==1.109.1",
+    "bm25s==0.2.14",
+    "faiss-gpu-cu12==1.9.0.post1",
+    "exa-py==1.14.20",
+    "tavily-python==0.7.10",
 ]
 
 generation = [
-    "vllm",
-    "openai",
-    "transformers",
+    "vllm==0.10.1.1",
+    "openai==1.109.1",
+    "transformers==4.57.1",
 ]
 
 corpus = [
-    "chonkie",
-    "pymupdf",
-    "mineru[core]",
+    "chonkie==1.1.2",
+    "pymupdf==1.26.5",
+    "mineru[core]==2.5.4",
 ]
 
 all = [
-    "ultrarag[retriever]",
-    "ultrarag[generation]",
-    "ultrarag[corpus]",
+    "lgagent[retriever]",
+    "lgagent[generation]",
+    "lgagent[corpus]",
 ]
 
 [tool.setuptools.packages.find]
@@ -61,3 +62,8 @@ where = ["src"]
 [project.scripts]
 ultrarag = "ultrarag.client:main"
 lgagent = "ultrarag.client:main"
+
+[dependency-groups]
+dev = [
+    "pytest==8.4.2",
+]

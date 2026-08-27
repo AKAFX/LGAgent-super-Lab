@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import csv
 import json
 import sys
@@ -41,8 +40,10 @@ from tools.legal_multi_agent_prompt_demo import (  # type: ignore
     run_lawyer_answer,
     run_lawyer_parser,
 )
-ToolCall = None
-initialize = None
+from lgagent.protocol import JudgeOutput, StructuredOutputError
+from lgagent.rag import RAGRetriever, RetrieverSettings
+from lgagent.ablation import build_task14_matrix, export_task14_matrix
+from lgagent.config import load_lgagent_config
 
 
 REASONING_KEYS_POOL = load_key_pool("LGAGENT_REASONING_API_KEYS")
@@ -224,33 +225,41 @@ def run_single_experiment(
     total = len(questions)
     started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    rag_enabled = False
+    retriever: RAGRetriever | None = None
     if config.use_rag and config.enable_judge:
         try:
-            global ToolCall, initialize
-            if ToolCall is None or initialize is None:
-                from ultrarag.api import ToolCall as _ToolCall, initialize as _initialize  # type: ignore
-
-                ToolCall = _ToolCall
-                initialize = _initialize
-            initialize(["retriever"], server_root=str(ROOT_DIR / "servers"))
-            rag_enabled = True
+            retriever = RAGRetriever(
+                RetrieverSettings.load(
+                    ROOT_DIR / "servers",
+                    top_k=3,
+                    project_root=ROOT_DIR,
+                )
+            )
+            retriever.initialize()
         except Exception:
-            rag_enabled = False
+            retriever = None
 
     use_multi_agent = config.enable_lawyer_a or config.enable_judge
     if use_multi_agent:
         reasoning_keys = (
-            REASONING_KEYS_POOL[:concurrency]
-            if len(REASONING_KEYS_POOL) >= concurrency
-            else [gen_conf.get("api_key", "")] * concurrency
+            [gen_conf["api_key"]] * concurrency
+            if gen_conf.get("api_key_source") == "yaml"
+            else (
+                REASONING_KEYS_POOL[:concurrency]
+                if len(REASONING_KEYS_POOL) >= concurrency
+                else [gen_conf.get("api_key", "")] * concurrency
+            )
         )
     else:
         reasoning_keys = []
     eval_keys = (
-        EVAL_KEYS_POOL[:concurrency]
-        if len(EVAL_KEYS_POOL) >= concurrency
-        else [gen_conf.get("api_key", "")] * concurrency
+        [gen_conf["api_key"]] * concurrency
+        if gen_conf.get("api_key_source") == "yaml"
+        else (
+            EVAL_KEYS_POOL[:concurrency]
+            if len(EVAL_KEYS_POOL) >= concurrency
+            else [gen_conf.get("api_key", "")] * concurrency
+        )
     )
     if not any(eval_keys):
         raise RuntimeError("没有可用的律师B API key。")
@@ -297,27 +306,11 @@ def run_single_experiment(
                         need_clarification=True,
                         clarification_question="请补充关键缺口与证据需求。",
                     )
-                try:
-                    j = json.loads((judge_res or "").strip())
-                    judge_need_retrieval = bool(j.get("need_retrieval", False))
-                except Exception:
-                    judge_need_retrieval = False
+                judge_need_retrieval = JudgeOutput.from_text(judge_res).need_retrieval
 
-            if config.enable_judge and rag_enabled and judge_need_retrieval:
-                def _search() -> Dict[str, Any]:
-                    try:
-                        loop = asyncio.get_event_loop()
-                    except RuntimeError:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                    return loop.run_until_complete(
-                        ToolCall.retriever.retriever_search(query_list=[q], top_k=3)
-                    )
-
+            if config.enable_judge and retriever is not None and judge_need_retrieval:
                 try:
-                    ret = _search().get("ret_psg", [])
-                    if ret and isinstance(ret[0], list):
-                        retrieved_docs = [str(x).strip() for x in ret[0] if x]
+                    retrieved_docs = retriever.search(q)
                 except Exception:
                     retrieved_docs = []
 
@@ -335,9 +328,18 @@ def run_single_experiment(
                 gen_conf=gen_conf if use_multi_agent else None,
                 enable_dialogue=effective_dialogue,
             )
+        except StructuredOutputError as e:
+            full_answer = f"[TASK_ERROR] {e}"
+            internal_json = {
+                "error_type": "structured_output",
+                "agent": e.agent,
+                "attempts": e.attempts,
+                "message": str(e),
+                "raw_output": e.raw_output,
+            }
         except Exception as e:
             full_answer = f"[TASK_ERROR] {e}"
-            internal_json = {"error": str(e)}
+            internal_json = {"error_type": "task", "message": str(e)}
 
         pred = extract_choice(str(full_answer))
         with progress_lock:
@@ -413,6 +415,8 @@ def run_single_experiment(
         golden_all,
         started_at,
     )
+    if retriever is not None:
+        retriever.close()
     return {
         "dataset": dataset_path.name,
         "dataset_path": str(dataset_path),
@@ -497,7 +501,7 @@ def write_summary_files(output_dir: Path, rows: List[Dict[str, Any]]) -> None:
         f.write("\n".join(lines))
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="多智能体组件消融自动化评测")
     ap.add_argument(
         "--datasets",
@@ -516,12 +520,33 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="可选：跳过的消融配置名称，如 ablation-none ablation-full",
     )
-    return ap.parse_args()
+    ap.add_argument(
+        "--matrix-only",
+        action="store_true",
+        help="仅离线校验并导出 Task 14 实验矩阵，不初始化客户端或调用 API",
+    )
+    ap.add_argument(
+        "--matrix-config",
+        type=str,
+        default=str(PARAM_PATH),
+        help="Task 14 实验矩阵使用的 YAML 配置路径",
+    )
+    return ap.parse_args(argv)
 
 
 def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir)
+    if args.matrix_only:
+        matrix_config = load_lgagent_config(args.matrix_config, environ={})
+        matrix = build_task14_matrix(matrix_config)
+        paths = export_task14_matrix(matrix, output_dir)
+        print(f"Task 14 实验矩阵校验通过：{len(matrix)} 个配置")
+        print(f"JSON：{paths['json']}")
+        print(f"CSV：{paths['csv']}")
+        print(f"Markdown：{paths['markdown']}")
+        return
+
     log_path = output_dir / "ablation_run.log"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -594,4 +619,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

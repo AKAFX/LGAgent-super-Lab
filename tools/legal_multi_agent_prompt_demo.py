@@ -16,42 +16,45 @@
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 
-import yaml  # 依赖 PyYAML
 from dotenv import load_dotenv
 from openai import OpenAI  # 依赖 openai>=1.0.0，兼容智增增 API
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+SRC_DIR = ROOT_DIR / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from lgagent.protocol import (
+    B0Output,
+    B1Output,
+    JudgeOutput,
+    LawyerAOutput,
+    StructuredOutputError,
+    should_request_clarification,
+)
+from lgagent.config import (
+    load_generation_config as load_domain_generation_config,
+    load_lgagent_config,
+)
+from lgagent.model import OpenAIChatModel
+from lgagent.runner import LGAgentPlusRunner
+from lgagent.serialization import dumps_json
 
 # ==== 用户可在这里固定律师B（待测模型）的配置 ====
 EVAL_MODEL = "deepseek-v3"          # 律师B 用的模型名字（在智增增或其他平台上的 ID）
 EVAL_BASE_URL = None                # 若为 None，沿用 legal2_rag_parameter.yaml 中的 base_url
 EVAL_API_KEY = None                 # 若为 None，沿用 legal2_rag_parameter.yaml 中的 api_key
 # ========================================
-ROOT_DIR = Path(__file__).resolve().parents[1]
 PARAM_PATH = ROOT_DIR / "examples" / "parameter" / "legal2_rag_parameter.yaml"
 load_dotenv(ROOT_DIR / ".env")
 
 
 def load_generation_config(param_path: Path) -> Dict[str, Any]:
-    with open(param_path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-    gen_cfg = cfg.get("generation", {}) or {}
-    backend = gen_cfg.get("backend", "openai")
-    backend_cfgs = gen_cfg.get("backend_configs", {}) or {}
-    backend_cfg = backend_cfgs.get(backend, {}) or {}
-
-    sampling = gen_cfg.get("sampling_params", {}) or {}
-
-    return {
-        "backend": backend,
-        "base_url": backend_cfg.get("base_url", "https://api.zhizengzeng.com/v1"),
-        "api_key": backend_cfg.get("api_key") or os.environ.get("LLM_API_KEY", ""),
-        "model": backend_cfg.get("model_name", "gpt-4o"),
-        "temperature": sampling.get("temperature", 0.7),
-        "top_p": sampling.get("top_p", 0.8),
-        "max_tokens": sampling.get("max_tokens", 2048),
-    }
+    return load_domain_generation_config(param_path).as_legacy_dict()
 
 
 def build_client(base_url: str, api_key: str) -> OpenAI:
@@ -129,6 +132,66 @@ def chat(
         return f"[API_ERROR: {error_type}] {error_msg}"
 
 
+def _chat_with_schema(
+    client: OpenAI,
+    config: Dict[str, Any],
+    messages: List[Dict[str, str]],
+    schema: Any,
+    agent: str,
+    max_tokens: int,
+    max_attempts: int = 2,
+) -> Tuple[str, Any, List[Dict[str, str]]]:
+    """Call an agent with one explicit repair attempt for invalid output."""
+    working_messages = list(messages)
+    last_content = ""
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        last_content = chat(
+            client,
+            model=config["model"],
+            messages=working_messages,
+            temperature=config["temperature"],
+            top_p=config["top_p"],
+            max_tokens=max_tokens,
+        ).strip()
+        working_messages.append({"role": "assistant", "content": last_content})
+        try:
+            parsed = schema.from_text(last_content)
+            return last_content, parsed, working_messages[1:]
+        except StructuredOutputError as exc:
+            last_error = exc
+            if attempt < max_attempts:
+                working_messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "上一响应不符合严格JSON协议："
+                            f"{exc}。请仅重新输出完整、合法且字段齐全的JSON对象。"
+                        ),
+                    }
+                )
+
+    raise StructuredOutputError(
+        agent,
+        str(last_error or "invalid structured output"),
+        attempts=max_attempts,
+        raw_output=last_content,
+    ) from last_error
+
+
+def _format_retrieved_docs(retrieved_docs: List[str] | None) -> str:
+    if not retrieved_docs:
+        return "（无检索证据）"
+    truncated_docs = []
+    for index, doc in enumerate(retrieved_docs[:3]):
+        doc_text = str(doc).strip()
+        if len(doc_text) > 300:
+            doc_text = doc_text[:300] + "..."
+        truncated_docs.append(f"[文档{index + 1}]\n{doc_text}")
+    return "\n\n".join(truncated_docs)
+
+
 def run_lawyer_parser(client: OpenAI, gen_conf: Dict[str, Any], question: str, conversation_history: List[Dict[str, str]] = None) -> Tuple[str, List[Dict[str, str]]]:
     """
     律师A（Issue Spotter / 结构化书记员）
@@ -147,20 +210,23 @@ def run_lawyer_parser(client: OpenAI, gen_conf: Dict[str, Any], question: str, c
         '  "task_type": "题型（如：单选、多选、判断等）",\n'
         '  "question_focus": "题干要比较的维度（如\\"最不具有专制特色\\"=\\"专制性最低\\"）",\n'
         '  "legal_domain": "法域/学科（如：法制史、刑法、民法、行政法等）",\n'
+        '  "jurisdiction": "司法辖区；无法确定时为空字符串",\n'
+        '  "case_date": "YYYY-MM-DD；无法确定时为null",\n'
+        '  "facts": [{"fact_id": "F1", "text": "题目事实", "legally_relevant": true}],\n'
         '  "option_claims": {\n'
-        '    "A": "把选项A改写成可判真伪的命题（如\\"X行为构成Y罪\\"）",\n'
-        '    "B": "把选项B改写成可判真伪的命题",\n'
-        '    "C": "把选项C改写成可判真伪的命题",\n'
-        '    "D": "把选项D改写成可判真伪的命题"\n'
+        '    "A": {"claim": "可判真伪的命题", "elements": ["构成要件"], "possible_exceptions": ["可能例外"]},\n'
+        '    "B": {"claim": "可判真伪的命题", "elements": [], "possible_exceptions": []},\n'
+        '    "C": {"claim": "可判真伪的命题", "elements": [], "possible_exceptions": []},\n'
+        '    "D": {"claim": "可判真伪的命题", "elements": [], "possible_exceptions": []}\n'
         '  },\n'
         '  "option_keywords": {\n'
-        '    "A": ["关键词1", "关键词2", ...],  // 每个选项3-5个关键词（精简）\n'
-        '    "B": ["关键词1", "关键词2", ...],\n'
-        '    "C": ["关键词1", "关键词2", ...],\n'
-        '    "D": ["关键词1", "关键词2", ...]\n'
+        '    "A": ["关键词1", "关键词2"],\n'
+        '    "B": ["关键词1", "关键词2"],\n'
+        '    "C": ["关键词1", "关键词2"],\n'
+        '    "D": ["关键词1", "关键词2"]\n'
         '  },\n'
-        '  "trap_signals": ["陷阱信号"],  // 仅列出最关键的1-2个\n'
-        '  "unknowns": ["关键缺口"]  // 仅列出最关键的1-2个\n'
+        '  "trap_signals": ["陷阱信号"],\n'
+        '  "unknowns": ["关键缺口"]\n'
         "}\n\n"
         "只输出 JSON，不要添加任何多余说明、推理过程或答案倾向。"
     )
@@ -175,20 +241,16 @@ def run_lawyer_parser(client: OpenAI, gen_conf: Dict[str, Any], question: str, c
     user_prompt = f"请解析下面的法律问题（题干+选项）：\n\n{question}"
     messages.append({"role": "user", "content": user_prompt})
 
-    # 优化：律师A输出应该比较简洁，限制max_tokens
-    content = chat(
+    content, _, updated_history = _chat_with_schema(
         client,
-        model=gen_conf["model"],
-        messages=messages,
-        temperature=gen_conf["temperature"],
-        top_p=gen_conf["top_p"],
+        gen_conf,
+        messages,
+        LawyerAOutput,
+        "lawyer_a",
         max_tokens=min(gen_conf["max_tokens"], 1024),  # 限制最大token数
     )
-    
-    # 更新对话历史
-    updated_history = messages[1:] + [{"role": "assistant", "content": content.strip()}]
-    
-    return content.strip(), updated_history
+
+    return content, updated_history
 
 
 def run_judge(
@@ -198,7 +260,10 @@ def run_judge(
     parsed_json: str = "",
     conversation_history: List[Dict[str, str]] = None,
     need_clarification: bool = False,
-    clarification_question: str = ""
+    clarification_question: str = "",
+    current_judge_json: str = "",
+    retrieved_docs: List[str] | None = None,
+    prior_verification: Dict[str, Any] | None = None,
 ) -> Tuple[str, List[Dict[str, str]], bool]:
     """
     法官（Process Controller / 反例规划官）
@@ -215,7 +280,7 @@ def run_judge(
         "- 只输出流程控制+证据需求+反例方向。\n\n"
         "【输出格式 - 严格JSON】\n"
         "{\n"
-        '  "need_retrieval": true/false,  // 是否需要检索（先用规则版判断）\n'
+        '  "need_retrieval": false,\n'
         '  "global_query": "1个全局检索query（短、狠、准）",\n'
         '  "option_queries": {\n'
         '    "A": "选项A的检索query",\n'
@@ -224,13 +289,13 @@ def run_judge(
         '    "D": "选项D的检索query"\n'
         '  },\n'
         '  "evidence_requirements": {\n'
-        '    "A": {"support": "支持证据要点", "refute": "反驳证据要点"},  // 简短描述，1-2句话\n'
-        '    "B": {"support": "...", "refute": "..."},\n'
-        '    "C": {"support": "...", "refute": "..."},\n'
-        '    "D": {"support": "...", "refute": "..."}\n'
+        '    "A": {"support": "支持证据要点", "refute": "反驳证据要点"},\n'
+        '    "B": {"support": "支持证据要点", "refute": "反驳证据要点"},\n'
+        '    "C": {"support": "支持证据要点", "refute": "反驳证据要点"},\n'
+        '    "D": {"support": "支持证据要点", "refute": "反驳证据要点"}\n'
         '  },\n'
-        '  "counterfactual_focus": "反例方向（简短）",  // 1-2句话\n'
-        '  "stop_rule": "裁决规则（简短）"  // 1-2句话\n'
+        '  "counterfactual_focus": "反例方向（简短）",\n'
+        '  "stop_rule": "裁决规则（简短）"\n'
         "}\n\n"
         "只输出 JSON，不要添加任何多余说明、推理过程或答案倾向。"
     )
@@ -242,52 +307,37 @@ def run_judge(
         messages.extend(conversation_history)
     
     # 构建用户提示
+    user_prompt = "原始问题如下：\n" f"{question}\n\n"
+    if parsed_json:
+        user_prompt += "律师A的结构化要素：\n" f"{parsed_json}\n\n"
+    if current_judge_json:
+        user_prompt += "当前法官输出：\n" f"{current_judge_json}\n\n"
+    user_prompt += "检索到的证据：\n" f"{_format_retrieved_docs(retrieved_docs)}\n\n"
+    if prior_verification:
+        user_prompt += (
+            "律师B上一轮核验报告：\n"
+            f"{json.dumps(prior_verification, ensure_ascii=False)}\n\n"
+        )
     if need_clarification and clarification_question:
-        # 多轮对话：回答澄清问题
-        user_prompt = (
-            f"律师A的澄清问题：{clarification_question}\n\n"
-            "请回答这个问题，并更新你的JSON输出。"
+        user_prompt += (
+            f"律师B的澄清问题：{clarification_question}\n\n"
+            "请在保留以上上下文的基础上更新完整JSON输出。"
         )
     else:
-        # 初始请求
-        user_prompt = (
-            "原始问题如下：\n"
-            f"{question}\n\n"
-        )
-        if parsed_json:
-            user_prompt += (
-                "解析律师（律师A）给出的结构化要素：\n"
-                f"{parsed_json}\n\n"
-            )
         user_prompt += "请在此基础上给出你的流程控制和证据需求分析。"
     
     messages.append({"role": "user", "content": user_prompt})
 
-    # 优化：法官输出应该比较简洁，限制max_tokens
-    content = chat(
+    content, _, updated_history = _chat_with_schema(
         client,
-        model=gen_conf["model"],
-        messages=messages,
-        temperature=gen_conf["temperature"],
-        top_p=gen_conf["top_p"],
+        gen_conf,
+        messages,
+        JudgeOutput,
+        "judge",
         max_tokens=min(gen_conf["max_tokens"], 1024),  # 限制最大token数
     )
-    
-    # 更新对话历史
-    updated_history = messages[1:] + [{"role": "assistant", "content": content.strip()}]
-    
-    # 判断是否需要继续对话（简单规则：如果JSON解析失败或内容过短，可能需要澄清）
-    should_continue = False
-    try:
-        judge_data = json.loads(content.strip())
-        # 如果某些关键字段缺失，可能需要澄清
-        if not judge_data.get("need_retrieval") is not None or not judge_data.get("option_queries"):
-            should_continue = True
-    except:
-        # JSON解析失败，可能需要澄清
-        should_continue = True
-    
-    return content.strip(), updated_history, should_continue
+
+    return content, updated_history, False
 
 
 def run_lawyer_answer_b0_blind(
@@ -311,32 +361,19 @@ def run_lawyer_answer_b0_blind(
     
     user_prompt = f"请分析以下法律问题并给出初步答案：\n\n{question}"
     
-    # 优化：律师B B0阶段输出应该非常简洁，限制max_tokens
-    content = chat(
+    _, result, _ = _chat_with_schema(
         client,
-        model=eval_conf["model"],
-        messages=[
+        eval_conf,
+        [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        temperature=eval_conf["temperature"],
-        top_p=eval_conf["top_p"],
+        B0Output,
+        "lawyer_b0",
         max_tokens=min(eval_conf["max_tokens"], 256),  # B0阶段只需要简单JSON，限制更严格
     )
-    
-    # 解析JSON
-    try:
-        result = json.loads(content.strip())
-        initial_answer = result.get("initial_answer", "")
-        confidence = float(result.get("confidence", 0.5))
-        return initial_answer, confidence
-    except:
-        # 如果JSON解析失败，尝试提取选项字母
-        import re
-        match = re.search(r'\b([A-D])\b', content.strip())
-        if match:
-            return match.group(1), 0.5
-        return "", 0.0
+
+    return result.initial_answer, result.confidence
 
 
 def run_lawyer_answer_b1_verification(
@@ -368,9 +405,9 @@ def run_lawyer_answer_b1_verification(
         '  "final_answer": "A/B/C/D中的一个",\n'
         '  "verification": {\n'
         '    "A": {"status": "SUPPORT/REFUTE/NEI", "score": 0.0-1.0, "reason": "简短理由（1句话）"},\n'
-        '    "B": {"status": "...", "score": ..., "reason": "..."},\n'
-        '    "C": {"status": "...", "score": ..., "reason": "..."},\n'
-        '    "D": {"status": "...", "score": ..., "reason": "..."}\n'
+        '    "B": {"status": "SUPPORT", "score": 0.0, "reason": "简短理由（1句话）"},\n'
+        '    "C": {"status": "REFUTE", "score": 0.0, "reason": "简短理由（1句话）"},\n'
+        '    "D": {"status": "NEI", "score": 0.0, "reason": "简短理由（1句话）"}\n'
         '  },\n'
         '  "initial_answer": "你的盲答结果",\n'
         '  "initial_confidence": 0.0-1.0,\n'
@@ -385,83 +422,28 @@ def run_lawyer_answer_b1_verification(
     if conversation_history:
         messages.extend(conversation_history)
     
-    # 构建用户提示
+    user_prompt = "原始问题：\n" f"{question}\n\n"
+    user_prompt += "律师A的结构化要素：\n" f"{parsed_json or '（无）'}\n\n"
+    user_prompt += "法官的流程控制和证据需求：\n" f"{judge_json or '（无）'}\n\n"
+    user_prompt += "检索到的证据：\n" f"{_format_retrieved_docs(retrieved_docs)}\n\n"
+    user_prompt += f"我的盲答结果：{initial_answer}（信心度：{initial_confidence:.2f}）\n\n"
     if need_clarification and clarification_question:
-        # 多轮对话：向法官提问
-        user_prompt = (
-            f"我的疑问：{clarification_question}\n\n"
-            "请法官回答后，我重新进行核验裁决。"
-        )
-    else:
-        # 初始核验请求
-        user_prompt = (
-            "原始问题：\n"
-            f"{question}\n\n"
-        )
-        
-        if parsed_json:
-            user_prompt += (
-                "律师A的结构化要素：\n"
-                f"{parsed_json}\n\n"
-            )
-        
-        if judge_json:
-            user_prompt += (
-                "法官的流程控制和证据需求：\n"
-                f"{judge_json}\n\n"
-            )
-        
-        if retrieved_docs and len(retrieved_docs) > 0:
-            # 优化：减少文档数量并截断过长文档（减少token消耗）
-            MAX_DOCS = 3  # 从10个减少到3个
-            MAX_DOC_LENGTH = 300  # 每个文档最多300字符
-            truncated_docs = []
-            for i, doc in enumerate(retrieved_docs[:MAX_DOCS]):
-                doc_str = str(doc).strip()
-                if len(doc_str) > MAX_DOC_LENGTH:
-                    doc_str = doc_str[:MAX_DOC_LENGTH] + "..."
-                truncated_docs.append(f"[文档{i+1}]\n{doc_str}")
-            docs_text = "\n\n".join(truncated_docs)
-            user_prompt += (
-                "检索到的证据：\n"
-                f"{docs_text}\n\n"
-            )
-        
-        user_prompt += (
-            f"我的盲答结果：{initial_answer}（信心度：{initial_confidence:.2f}）\n\n"
-            "请基于以上信息进行逐选项核验，并输出最终答案。"
-        )
+        user_prompt += f"本轮澄清问题：{clarification_question}\n\n"
+    user_prompt += "请基于以上完整信息进行逐选项核验，并输出最终答案。"
     
     messages.append({"role": "user", "content": user_prompt})
 
-    # 优化：律师B B1阶段输出应该比较简洁，限制max_tokens
-    content = chat(
+    _, result, updated_history = _chat_with_schema(
         client,
-        model=eval_conf["model"],
-        messages=messages,
-        temperature=eval_conf["temperature"],
-        top_p=eval_conf["top_p"],
+        eval_conf,
+        messages,
+        B1Output,
+        "lawyer_b1",
         max_tokens=min(eval_conf["max_tokens"], 1024),  # 限制最大token数
     )
-    
-    # 更新对话历史
-    updated_history = messages[1:] + [{"role": "assistant", "content": content.strip()}]
-    
-    # 解析JSON
-    try:
-        result = json.loads(content.strip())
-        final_answer = result.get("final_answer", "")
-        internal_json = result
-        should_continue = False
-    except:
-        # JSON解析失败，尝试提取选项字母
-        import re
-        match = re.search(r'\b([A-D])\b', content.strip())
-        final_answer = match.group(1) if match else ""
-        internal_json = {"final_answer": final_answer, "error": "JSON解析失败"}
-        should_continue = True  # 可能需要澄清
-    
-    return final_answer, internal_json, updated_history, should_continue
+
+    should_continue = should_request_clarification(result.verification, initial_confidence)
+    return result.final_answer, result.raw, updated_history, should_continue
 
 
 def run_lawyer_judge_dialogue(
@@ -484,63 +466,69 @@ def run_lawyer_judge_dialogue(
     Returns:
         (final_answer, internal_json, updated_lawyer_b_history)
     """
-    final_answer = initial_answer
-    internal_json = {"final_answer": initial_answer}
-    current_history = lawyer_b_history.copy()
-    judge_history = []
+    final_answer, internal_json, current_history, need_clarification = (
+        run_lawyer_answer_b1_verification(
+            eval_client,
+            eval_conf,
+            question,
+            parsed_json,
+            judge_json,
+            retrieved_docs,
+            initial_answer,
+            initial_confidence,
+            lawyer_b_history,
+        )
+    )
+    judge_history: List[Dict[str, str]] = []
+    current_judge_json = judge_json
+    judge_updates: List[str] = []
     dialogue_rounds = 0
-    
-    for round_num in range(max_rounds):
-        dialogue_rounds = round_num + 1
-        # 律师B提出疑问（如果有）
-        if round_num == 0:
-            # 第一轮：律师B进行核验，可能产生疑问
-            final_answer, internal_json, current_history, need_clarification = run_lawyer_answer_b1_verification(
-                eval_client, eval_conf, question, parsed_json, judge_json,
-                retrieved_docs, initial_answer, initial_confidence, current_history
-            )
-            
-            if not need_clarification:
-                break
-            
-            # 提取疑问（简单规则：如果confidence低或verification中有多个NEI，可能需要澄清）
-            clarification_question = ""
-            if isinstance(internal_json, dict):
-                verification = internal_json.get("verification", {})
-                nei_count = sum(1 for v in verification.values() if isinstance(v, dict) and v.get("status") == "NEI")
-                if nei_count >= 2 or internal_json.get("initial_confidence", 1.0) < 0.6:
-                    clarification_question = "我对某些选项的证据支持度不确定，能否提供更具体的证据需求指导？"
-        else:
-            # 后续轮次：基于法官的回答继续核验
-            clarification_question = "请基于之前的回答，我重新进行核验。"
-        
-        if not clarification_question:
-            break
-        
+
+    while need_clarification and dialogue_rounds < max_rounds:
+        clarification_question = (
+            "当前逐项核验中至少一半选项为NEI，或B0校准置信度低于0.6。"
+            "请针对证据缺口提供更具体的核验指导。"
+        )
         # 法官回答律师B的疑问
         judge_response, judge_history, _ = run_judge(
-            reasoning_client, gen_conf, question, parsed_json,
-            judge_history, need_clarification=True, clarification_question=clarification_question
+            reasoning_client,
+            gen_conf,
+            question,
+            parsed_json,
+            judge_history,
+            need_clarification=True,
+            clarification_question=clarification_question,
+            current_judge_json=current_judge_json,
+            retrieved_docs=retrieved_docs,
+            prior_verification=internal_json,
         )
-        
-        # 更新judge_json（合并法官的新回答）
-        updated_judge_json = judge_response
-        
+        current_judge_json = judge_response
+        judge_updates.append(judge_response)
+
         # 律师B基于法官的回答重新核验
         final_answer, internal_json, current_history, need_clarification = run_lawyer_answer_b1_verification(
-            eval_client, eval_conf, question, parsed_json, updated_judge_json,
-            retrieved_docs, initial_answer, initial_confidence, current_history,
-            need_clarification=True, clarification_question=clarification_question
+            eval_client,
+            eval_conf,
+            question,
+            parsed_json,
+            current_judge_json,
+            retrieved_docs,
+            initial_answer,
+            initial_confidence,
+            current_history,
+            need_clarification=True,
+            clarification_question=clarification_question,
         )
-        
-        if not need_clarification:
-            break
+        dialogue_rounds += 1
     
     # 合并B0和B1的信息到internal_json
     if isinstance(internal_json, dict):
         internal_json["b0_blind_answer"] = initial_answer
         internal_json["b0_confidence"] = initial_confidence
+        internal_json["initial_b1_completed"] = True
         internal_json["dialogue_rounds"] = dialogue_rounds
+        internal_json["dialogue_exhausted"] = need_clarification
+        internal_json["judge_dialogue_outputs"] = judge_updates
     
     return final_answer, internal_json, current_history
 
@@ -616,6 +604,9 @@ def run_lawyer_answer(
     if isinstance(internal_json, dict):
         internal_json["b0_blind_answer"] = initial_answer
         internal_json["b0_confidence"] = initial_confidence
+        internal_json.setdefault("initial_b1_completed", True)
+        internal_json.setdefault("dialogue_rounds", 0)
+        internal_json.setdefault("dialogue_exhausted", False)
     
     return final_answer, internal_json
 
@@ -636,7 +627,8 @@ def main():
         print("请输入法律问题，结束后按 Ctrl+D：")
         question = "".join(iter(input, ""))  # type: ignore
 
-    gen_conf = load_generation_config(PARAM_PATH)
+    app_conf = load_lgagent_config(PARAM_PATH)
+    gen_conf = app_conf.generation.as_legacy_dict()
     if not gen_conf["api_key"]:
         raise RuntimeError(
             "generation.api_key 为空，请先在 examples/parameter/legal2_rag_parameter.yaml 中填好 API Key。"
@@ -646,31 +638,54 @@ def main():
     reasoning_client = build_client(gen_conf["base_url"], gen_conf["api_key"])
 
     # 律师B：使用待测模型，全部在文件顶部配置，不再通过命令行传参
+    eval_api_key = (
+        gen_conf["api_key"]
+        if gen_conf.get("api_key_source") == "yaml"
+        else EVAL_API_KEY
+        or os.environ.get("LGAGENT_EVAL_API_KEY")
+        or gen_conf["api_key"]
+    )
     eval_conf: Dict[str, Any] = {
         "model": EVAL_MODEL or gen_conf["model"],
         "base_url": EVAL_BASE_URL or gen_conf["base_url"],
-        "api_key": EVAL_API_KEY or os.environ.get("LGAGENT_EVAL_API_KEY") or gen_conf["api_key"],
+        "api_key": eval_api_key,
+        "api_key_source": (
+            "generation_yaml"
+            if gen_conf.get("api_key_source") == "yaml"
+            else "evaluation_override"
+        ),
         "temperature": gen_conf["temperature"],
         "top_p": gen_conf["top_p"],
         "max_tokens": gen_conf["max_tokens"],
     }
     eval_client = build_client(eval_conf["base_url"], eval_conf["api_key"])
+    verifier_settings = app_conf.lgagent_plus.cape_v.verifier_model
+    verifier_model = None
+    if verifier_settings is not None:
+        verifier_model = OpenAIChatModel(
+            build_client(
+                verifier_settings.base_url,
+                verifier_settings.api_key or eval_api_key,
+            )
+        )
+
+    result = LGAgentPlusRunner(
+        app_conf,
+        reasoning_model=OpenAIChatModel(reasoning_client),
+        evaluation_model=OpenAIChatModel(eval_client),
+        evaluation_config=eval_conf,
+        verifier_model=verifier_model,
+        project_root=ROOT_DIR,
+    ).run(question)
 
     print("=== 律师A：解析问题（结构化要素） ===")
-    parsed, _ = run_lawyer_parser(reasoning_client, gen_conf, question)
-    print(parsed)
-
+    print(result.lawyer_a_output)
     print("\n=== 法官：法律推理与裁判思路（JSON） ===")
-    judge_res, _, _ = run_judge(reasoning_client, gen_conf, question, parsed)
-    print(judge_res)
-
+    print(result.judge_output)
     print("\n=== 律师B：面向用户/考生的最终回答 ===")
-    final_answer, internal_json = run_lawyer_answer(
-        eval_client, eval_conf, question, parsed, judge_res,
-        reasoning_client=reasoning_client, gen_conf=gen_conf, enable_dialogue=True
-    )
-    print(f"最终答案：{final_answer}")
-    print(f"\n内部JSON（用于诊断）：\n{json.dumps(internal_json, ensure_ascii=False, indent=2)}")
+    print(f"最终答案：{result.final_answer}")
+    print(f"\n内部JSON（用于诊断）：\n{dumps_json(result.diagnostics)}")
+    print(f"\n结构化Trace：\n{dumps_json(result.trace)}")
 
 
 if __name__ == "__main__":

@@ -91,9 +91,18 @@ LGAgent turns economical backbones into competitive legal reasoners. In the samp
 ### 1. Create the environment
 
 ```bash
-conda create -n lgagent python=3.11 -y
-conda activate lgagent
-pip install -e .
+./scripts/bootstrap_git_lfs.sh
+uv sync --python 3.11 --no-dev
+source .venv/bin/activate
+```
+
+The bootstrap script installs the pinned Git LFS client under `.tools/`, configures
+this repository only, and downloads the dataset objects. Verify the reproducible
+baseline without credentials or network access:
+
+```bash
+python tools/baseline_check.py
+python -m unittest tests.test_baseline_check
 ```
 
 ### 2. Configure an OpenAI-compatible model
@@ -106,6 +115,14 @@ Set `LLM_API_KEY` in `.env`, then update the model name and `base_url` in:
 
 ```text
 examples/parameter/legal2_rag_parameter.yaml
+```
+
+When `api_key` is set in that YAML file it takes precedence; `LLM_API_KEY` is
+used only when the YAML value is empty. Run the credentialed single-question
+smoke test explicitly:
+
+```bash
+python tools/baseline_check.py --online-smoke
 ```
 
 For concurrent evaluation, optional comma-separated key pools can be supplied through:

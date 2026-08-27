@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import yaml
+from dotenv import load_dotenv
 from openai import OpenAI
 
 # ==== 配置参数 ====
@@ -33,6 +34,7 @@ from tools.key_pool import load_key_pool
 DIMENSION_JSONL_DIR = ROOT_DIR / "data" / "dimension_jsonl" 
 OUTPUT_DIR = ROOT_DIR / "output"
 PARAM_PATH = ROOT_DIR / "examples" / "parameter" / "legal2_rag_parameter.yaml"
+load_dotenv(ROOT_DIR / ".env")
 
 # 模型配置
 EVAL_MODEL = "glm-4-air"
@@ -55,11 +57,13 @@ def load_generation_config(param_path: Path) -> Dict[str, Any]:
     backend_cfg = backend_cfgs.get(backend, {}) or {}
 
     sampling = gen_cfg.get("sampling_params", {}) or {}
+    yaml_api_key = backend_cfg.get("api_key") or ""
 
     return {
         "backend": backend,
         "base_url": backend_cfg.get("base_url", "https://api.zhizengzeng.com/v1"),
-        "api_key": backend_cfg.get("api_key", ""),
+        "api_key": yaml_api_key or os.environ.get("LLM_API_KEY", ""),
+        "api_key_source": "yaml" if yaml_api_key else "environment",
         "model": backend_cfg.get("model_name", "gpt-4o"),
         "temperature": sampling.get("temperature", 0.7),
         "top_p": sampling.get("top_p", 0.8),
@@ -268,7 +272,10 @@ def run_eval(
         }
 
         # 2. 准备 API key 池
-        if API_KEYS_POOL and len(API_KEYS_POOL) >= CONCURRENCY:
+        if gen_conf["api_key_source"] == "yaml":
+            eval_keys = [gen_conf["api_key"]] * CONCURRENCY
+            print(f"使用 YAML API key：{CONCURRENCY} 组并行（可能触发限流）")
+        elif API_KEYS_POOL and len(API_KEYS_POOL) >= CONCURRENCY:
             eval_keys = API_KEYS_POOL[:CONCURRENCY]
             print(f"使用多 API key 池模式：{len(eval_keys)} 个 key，并发数：{CONCURRENCY}")
         else:

@@ -29,7 +29,7 @@ generation:
       model_name_or_path: openbmb/MiniCPM4-8B
       trust_remote_code: true
     openai:
-      api_key: ''  # 如果使用API key池，这里可以为空；否则请填入你的API key
+    api_key: "${OPENAI_API_KEY}"
       base_delay: 1.0
       base_url: https://api.zhizengzeng.com/v1  # 智增增API地址，可根据实际情况修改
       concurrency: 8
@@ -48,6 +48,64 @@ generation:
     temperature: 0.7
     top_p: 0.8
   system_prompt: ''
+lgagent_plus:
+  enabled: false
+  seed: 42
+  oath_rag:
+    enabled: true
+    corpus_path: data/oath/oath_just_laws_strict.jsonl
+    corpus_failure_mode: fail_closed
+    lexical_top_k: 20
+    dense_top_k: 20
+    final_top_k_per_lane: 3
+    graph_hops: 1
+    require_temporal_match: true
+    require_authoritative_source: true
+  cape_v:
+    enabled: true
+    initial_candidates: 1
+    slow_path_candidates: 1
+    permutation_count: 3
+    enable_counterfactual: false
+    candidate_max_tokens: 1024
+    verifiers:
+      rule: true
+      fact: true
+      exception: true
+      evidence: true
+      entailment: true
+    verifier:
+      timeout_seconds: 30
+      max_attempts: 2
+      max_tokens: 512
+      weights:
+        rule: 1.0
+        fact: 1.0
+        exception: 1.0
+        evidence: 1.0
+        entailment: 1.0
+    verifier_model:
+      backend: openai
+      base_url: https://api.zhizengzeng.com/v1
+    api_key: "${OPENAI_API_KEY}"
+      model_name: deepseek-v3
+      temperature: 0.0
+      top_p: 1.0
+      max_tokens: 512
+  risk:
+    low_threshold: 0.30
+    high_threshold: 0.65
+    weights:
+      normalized_answer_entropy: 1.0
+      permutation_instability: 1.0
+      verifier_disagreement: 1.0
+      evidence_conflict: 1.0
+      missing_evidence_coverage: 1.0
+      low_top2_margin: 1.0
+    max_rounds: 2
+    max_model_calls: 32
+    max_total_tokens: 32768
+    max_wall_time_seconds: 120
 prompt:
   template: prompt/qa_boxed_single_choice_simple.jinja
 retriever:
@@ -62,7 +120,7 @@ retriever:
       pooling_method: auto
       trust_remote_code: true
     openai:
-      api_key: ''
+    api_key: "${OPENAI_API_KEY}"
       base_url: https://api.openai.com/v1
       model_name: text-embedding-3-small
     sentence_transformers:
