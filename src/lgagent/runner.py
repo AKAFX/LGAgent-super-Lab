@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from copy import copy
 from dataclasses import replace
 from pathlib import Path
@@ -14,6 +15,12 @@ from .cape_v import (
     CapeVRunner,
     ReasoningCandidate,
     calculate_cape_v_metrics,
+)
+from .clex import (
+    CLEX_SCORE_VERSION,
+    ClexCalibration,
+    apply_calibration,
+    score_options,
 )
 from .config import LGAgentConfig, ModelConfig
 from .counterfactual import (
@@ -34,6 +41,17 @@ from .evidence_audit import (
     TemporalStatus,
 )
 from .model import BudgetedSeededChatModel, ChatModel, ExecutionBudget
+from .legal_mcq import (
+    EvidenceProvider,
+    LegalMCQAgent,
+    LegalMCQPolicy,
+    LegalMCQRunResult,
+    LegalQuestionRequest,
+    SolverTimeoutCircuitBreaker,
+    SolveMode,
+    parse_question_text,
+)
+from .legal_mcq.observability import redact_telemetry
 from .oath_rag import OathRagConfig, OathRagRetriever
 from .protocol import LawyerAOutput, OptionClaim
 from .risk import (
@@ -43,9 +61,10 @@ from .risk import (
     RiskRoute,
     RiskSnapshot,
 )
-from .serialization import to_jsonable
+from .serialization import dumps_json, to_jsonable
 from .trace import RunTrace
 from .verification import VerificationContext, VerificationReport, VerificationRunner
+from .web_search import BudgetedWebSearch
 
 
 class LGAgentPlusRunner:
@@ -59,7 +78,13 @@ class LGAgentPlusRunner:
         evaluation_model: ChatModel,
         evaluation_config: ModelConfig | Mapping[str, Any] | None = None,
         verifier_model: ChatModel | None = None,
+        legal_controller_model: ChatModel | None = None,
+        legal_solver_model: ChatModel | None = None,
+        legal_solver_fallback_model: ChatModel | None = None,
+        legal_verifier_model: ChatModel | None = None,
+        legal_evidence_provider: EvidenceProvider | None = None,
         evidence_pipeline: EvidenceAuditPipeline | None = None,
+        web_search_pipeline: BudgetedWebSearch | None = None,
         project_root: str | Path | None = None,
         max_dialogue_rounds: int = 2,
         evidence_lanes: Sequence[str] = ("support", "refute", "exception"),
@@ -73,12 +98,252 @@ class LGAgentPlusRunner:
             evaluation_config or config.generation
         )
         self.verifier_model = verifier_model or evaluation_model
+        self.legal_controller_model = legal_controller_model or reasoning_model
+        self.legal_solver_model = legal_solver_model or evaluation_model
+        self.legal_solver_fallback_model = legal_solver_fallback_model
+        if (
+            config.legal_mcq.solver_fallback_model is not None
+            and self.legal_solver_fallback_model is None
+        ):
+            raise ValueError(
+                "configured solver_fallback_model requires a fallback client"
+            )
+        self.legal_verifier_model = (
+            legal_verifier_model
+            or legal_controller_model
+            or reasoning_model
+        )
+        self.legal_evidence_provider = legal_evidence_provider
         self.project_root = Path(project_root or Path.cwd())
         self.max_dialogue_rounds = max_dialogue_rounds
         self.evidence_lanes = tuple(evidence_lanes)
         self.fixed_compute = fixed_compute
         self._evidence_pipeline = evidence_pipeline
+        self._web_search_pipeline = web_search_pipeline
         self.clock = clock
+        self._clex_calibration: ClexCalibration | None = None
+        self._legal_solver_circuit_breaker = (
+            SolverTimeoutCircuitBreaker(
+                config.legal_mcq.solver_timeout_circuit_breaker
+            )
+            if config.legal_mcq.solver_fallback_model is not None
+            else None
+        )
+
+    def _solve_legal_request(
+        self,
+        request: LegalQuestionRequest,
+        *,
+        trace: RunTrace | None = None,
+        log_model_output: bool = False,
+    ) -> tuple[
+        LegalMCQRunResult,
+        ExecutionBudget,
+        RunTrace,
+        tuple[ModelConfig, ModelConfig, ModelConfig],
+    ]:
+        settings = self.config.legal_mcq
+        trace = trace or RunTrace()
+        budget = ExecutionBudget(
+            max_calls=settings.max_model_calls,
+            max_tokens=settings.max_total_tokens,
+            max_seconds=settings.max_wall_time_seconds,
+            clock=self.clock,
+            on_exhausted=lambda reason, details: trace.add_route(
+                "legal-mcq-budget-exhausted",
+                f"LegalMCQ execution budget exhausted: {reason}",
+                details,
+            ),
+        )
+        wrapped: dict[int, BudgetedSeededChatModel] = {}
+
+        def wrap(model: ChatModel) -> BudgetedSeededChatModel:
+            key = id(model)
+            if key not in wrapped:
+                wrapped[key] = BudgetedSeededChatModel(
+                    model,
+                    budget,
+                    base_seed=settings.seed,
+                )
+            return wrapped[key]
+
+        controller_config = settings.controller_model or self.config.generation
+        solver_config = settings.solver_model or self.evaluation_config
+        solver_fallback_config = settings.solver_fallback_model
+        verifier_config = settings.verifier_model or controller_config
+        try:
+            result = LegalMCQAgent(
+                controller_model=wrap(self.legal_controller_model),
+                solver_model=wrap(self.legal_solver_model),
+                solver_fallback_model=(
+                    wrap(self.legal_solver_fallback_model)
+                    if self.legal_solver_fallback_model is not None
+                    else None
+                ),
+                verifier_model=wrap(self.legal_verifier_model),
+                controller_config=controller_config,
+                solver_config=solver_config,
+                solver_fallback_config=solver_fallback_config,
+                verifier_config=verifier_config,
+                policy=LegalMCQPolicy(
+                    max_attempts=settings.max_attempts,
+                    max_revision_rounds=settings.max_revision_rounds,
+                    model_call_timeout_seconds=(
+                        settings.model_call_timeout_seconds
+                    ),
+                    controller_call_timeout_seconds=(
+                        settings.controller_call_timeout_seconds
+                    ),
+                    solver_call_timeout_seconds=(
+                        settings.solver_call_timeout_seconds
+                    ),
+                    solver_fallback_timeout_seconds=(
+                        settings.solver_fallback_timeout_seconds
+                    ),
+                    verifier_call_timeout_seconds=(
+                        settings.verifier_call_timeout_seconds
+                    ),
+                    solver_timeout_retries=settings.solver_timeout_retries,
+                    solver_structured_output_mode=(
+                        settings.solver_structured_output_mode
+                    ),
+                    controller_structured_output_mode=settings.controller_structured_output_mode,
+                    verifier_structured_output_mode=(
+                        settings.verifier_structured_output_mode
+                    ),
+                    solver_visible_output_tokens=settings.solver_visible_output_tokens,
+                    solver_reasoning_allowance_tokens=settings.solver_reasoning_allowance_tokens,
+                    verifier_visible_output_tokens=(
+                        settings.verifier_visible_output_tokens
+                    ),
+                    verifier_length_retry_tokens=(
+                        settings.verifier_length_retry_tokens
+                    ),
+                    auxiliary_reasoning_reserve_tokens=settings.auxiliary_reasoning_reserve_tokens,
+                    skip_verifier_on_deterministic_errors=(
+                        settings.skip_verifier_on_deterministic_errors
+                    ),
+                    min_authority_level=settings.min_authority_level,
+                    prompt_version=settings.prompt_version,
+                ),
+                evidence_provider=self.legal_evidence_provider,
+                execution_budget=budget,
+                log_model_output=log_model_output,
+                solver_circuit_breaker=self._legal_solver_circuit_breaker,
+            ).solve(request, trace=trace)
+        except Exception as exc:
+            diagnostics = dict(getattr(exc, "diagnostics", {}))
+            details = getattr(exc, "details", {})
+            diagnostics.update(
+                trace=trace.as_dict(),
+                execution_budget=budget.snapshot(),
+                failed_agent=(
+                    diagnostics.get("agent")
+                    or details.get("agent")
+                    or (trace.model_calls[-1].agent if trace.model_calls else None)
+                ),
+            )
+            exc.diagnostics = redact_telemetry(
+                diagnostics,
+                (
+                    self.config.generation.api_key,
+                    controller_config.api_key,
+                    solver_config.api_key,
+                    (
+                        solver_fallback_config.api_key
+                        if solver_fallback_config is not None
+                        else ""
+                    ),
+                    verifier_config.api_key,
+                ),
+            )
+            raise
+        result = replace(result, execution_budget=budget.snapshot())
+        return (
+            result,
+            budget,
+            trace,
+            (controller_config, solver_config, verifier_config),
+        )
+
+    def run_legal_request(
+        self,
+        request: LegalQuestionRequest,
+        *,
+        trace: RunTrace | None = None,
+        log_model_output: bool = False,
+    ) -> LegalMCQRunResult:
+        """Run an already isolated request without accepting an evaluation oracle."""
+        if not self.config.legal_mcq.enabled:
+            raise ValueError("legal_mcq.enabled must be true")
+        result, _, _, _ = self._solve_legal_request(
+            request, trace=trace, log_model_output=log_model_output
+        )
+        return result
+
+    def _run_legal_mcq(self, question: str) -> SingleQuestionResult:
+        settings = self.config.legal_mcq
+        request = parse_question_text(
+            question,
+            mode=SolveMode(settings.mode),
+        )
+        result, budget, trace, configs = self._solve_legal_request(request)
+        controller_config, solver_config, verifier_config = configs
+        diagnostics = result.diagnostics()
+        diagnostics.update(
+            {
+                "pipeline_route": "legal-mcq-three-role",
+                "execution_budget": budget.snapshot(),
+                "model_policy": {
+                    "controller": controller_config.model,
+                    "solver": solver_config.model,
+                    "solver_fallback": (
+                        self.config.legal_mcq.solver_fallback_model.model
+                        if self.config.legal_mcq.solver_fallback_model
+                        else None
+                    ),
+                    "verifier": verifier_config.model,
+                },
+                "reproduction": {
+                    "seed_requested": settings.seed,
+                    "seed_derivation": (
+                        "sha256(base_seed,metadata,occurrence)-31bit-v1"
+                    ),
+                    "provider_seed_guarantee": "requested_not_guaranteed",
+                },
+            }
+        )
+        return SingleQuestionResult(
+            final_answer="".join(result.answer.selected_options),
+            lawyer_a_output=dumps_json(result.controller_plan.raw),
+            judge_output=dumps_json(result.verification.raw),
+            diagnostics=diagnostics,
+            trace=trace,
+        )
+
+    def _load_clex_calibration(self) -> ClexCalibration:
+        if self._clex_calibration is not None:
+            return self._clex_calibration
+        settings = self.config.lgagent_plus.clex
+        path = Path(settings.calibration_path)
+        if not path.is_absolute():
+            path = self.project_root / path
+        calibration = ClexCalibration.load(path)
+        if not math.isclose(
+            calibration.alpha,
+            settings.alpha,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError(
+                "C-LEX calibration alpha does not match lgagent_plus.clex.alpha"
+            )
+        if calibration.group_field != settings.group_field:
+            raise ValueError(
+                "C-LEX calibration group_field does not match configuration"
+            )
+        self._clex_calibration = calibration
+        return calibration
 
     def _build_evidence_pipeline(
         self,
@@ -157,7 +422,9 @@ class LGAgentPlusRunner:
         else:
             matrix = pipeline.run(
                 analysis,
-                jurisdiction=analysis.jurisdiction or None,
+                jurisdiction=(
+                    analysis.jurisdiction or settings.default_jurisdiction
+                ),
                 case_date=analysis.case_date,
                 trace=trace,
             )
@@ -448,8 +715,16 @@ class LGAgentPlusRunner:
         )
 
     def run(self, question: str) -> SingleQuestionResult:
+        if self.config.legal_mcq.enabled:
+            return self._run_legal_mcq(question)
         trace = RunTrace()
         plus = self.config.lgagent_plus
+        clex_calibration = (
+            self._load_clex_calibration() if plus.clex.enabled else None
+        )
+        web_search_pipeline = self._web_search_pipeline
+        if plus.enabled and plus.web_search.enabled and web_search_pipeline is None:
+            web_search_pipeline = BudgetedWebSearch(plus.web_search)
         captured_matrix: AuditedEvidenceMatrix | None = None
         budget = ExecutionBudget(
             max_calls=plus.risk.budget.max_calls,
@@ -490,6 +765,23 @@ class LGAgentPlusRunner:
             )
             return captured_matrix
 
+        def provide_web_evidence(
+            current_question: str,
+            analysis: Any,
+            judge: Any,
+            b0: Any,
+            run_trace: RunTrace,
+        ) -> tuple[list[str], Mapping[str, Any]]:
+            assert web_search_pipeline is not None
+            outcome = web_search_pipeline.retrieve(
+                current_question,
+                analysis,
+                judge,
+                b0,
+                run_trace,
+            )
+            return list(outcome.documents), outcome.as_dict()
+
         baseline = SingleQuestionRunner(
             reasoning_model,
             evaluation_model,
@@ -507,6 +799,9 @@ class LGAgentPlusRunner:
             evidence_provider=provide_evidence
             if plus.enabled and plus.oath_rag.enabled
             else None,
+            retrieved_docs_provider=provide_web_evidence
+            if plus.enabled and plus.web_search.enabled
+            else None,
             trace=trace,
         )
         if not plus.enabled or not plus.cape_v.enabled:
@@ -514,7 +809,11 @@ class LGAgentPlusRunner:
             diagnostics["pipeline_route"] = (
                 "oath-only"
                 if plus.enabled and plus.oath_rag.enabled
-                else "corrected_baseline"
+                else (
+                    "web-search-only"
+                    if plus.enabled and plus.web_search.enabled
+                    else "corrected_baseline"
+                )
             )
             diagnostics["evidence_matrix"] = (
                 captured_matrix.as_dict() if captured_matrix is not None else {}
@@ -711,11 +1010,42 @@ class LGAgentPlusRunner:
             trace=trace,
             fixed_compute=self.fixed_compute,
         )
+        clex_scores = score_options(
+            adaptive.candidates,
+            evidence_matrix=captured_matrix,
+            permutation_answers=permutation_answers,
+        )
+        final_answer = adaptive.selected.answer
+        clex_decision = None
+        if clex_calibration is not None:
+            clex_decision = apply_calibration(
+                clex_scores,
+                clex_calibration,
+                current_answer=final_answer,
+                group=analysis.legal_domain,
+                min_calibration_size=plus.clex.min_calibration_size,
+            )
+            final_answer = clex_decision.selected_answer
+            trace.add_route(
+                "clex",
+                (
+                    "conformal prediction set applied"
+                    if clex_decision.applied
+                    else f"C-LEX fallback: {clex_decision.fallback_reason}"
+                ),
+                {
+                    "prediction_set": list(clex_decision.prediction_set),
+                    "selected_answer": final_answer,
+                    "threshold": clex_decision.threshold,
+                    "threshold_source": clex_decision.threshold_source,
+                    "eliminated": list(clex_decision.eliminated),
+                },
+            )
         counterfactual_observations: tuple[CounterfactualObservation, ...] = ()
         if plus.cape_v.enable_counterfactual:
             counterfactual_observations = self._counterfactual_observations(
                 question,
-                original_answer=adaptive.selected.answer,
+                original_answer=final_answer,
                 initial_cape=initial_cape,
                 trusted_context=trusted_context,
                 trace=trace,
@@ -764,6 +1094,20 @@ class LGAgentPlusRunner:
                 ],
                 "counterfactual_metrics": to_jsonable(counterfactual_metrics),
                 "targeted_retrievals": targeted_retrievals,
+                "clex_option_scores": {
+                    option: score.as_dict()
+                    for option, score in clex_scores.items()
+                },
+                "clex_score_version": CLEX_SCORE_VERSION,
+                "clex": (
+                    clex_decision.as_dict()
+                    if clex_decision is not None
+                    else {
+                        "enabled": False,
+                        "prediction_set": [],
+                        "selected_answer": final_answer,
+                    }
+                ),
                 "risk_score": adaptive.risk,
                 "risk_routing": {
                     "route": adaptive.route.value,
@@ -785,6 +1129,6 @@ class LGAgentPlusRunner:
         )
         return replace(
             baseline,
-            final_answer=adaptive.selected.answer,
+            final_answer=final_answer,
             diagnostics=diagnostics,
         )

@@ -96,6 +96,22 @@ class StrictJsonAndSchemaTest(unittest.TestCase):
             "A",
         )
 
+    def test_lawyer_a_normalizes_explicit_null_date_aliases(self) -> None:
+        for value in ("null", "None", "不适用", "未知", "无"):
+            with self.subTest(value=value):
+                payload = lawyer_a_payload()
+                payload["case_date"] = value
+                self.assertIsNone(
+                    LawyerAOutput.from_text(
+                        json.dumps(payload, ensure_ascii=False)
+                    ).case_date
+                )
+
+        payload = lawyer_a_payload()
+        payload["case_date"] = "not-a-date"
+        with self.assertRaisesRegex(StructuredOutputError, "ISO date"):
+            LawyerAOutput.from_text(json.dumps(payload))
+
     def test_missing_field_and_illegal_option_are_rejected(self) -> None:
         missing = lawyer_a_payload()
         del missing["question_focus"]

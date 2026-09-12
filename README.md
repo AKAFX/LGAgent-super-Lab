@@ -17,6 +17,9 @@
 
 ---
 
+中文全量技术总结：
+[`LGAgent 全面优化与法律推理增强技术报告`](docs/LGAgent全面优化与法律推理增强技术报告_20260912.md)。
+
 ## Overview
 
 Large language models are capable legal reasoners, but a single end-to-end model often mixes issue identification, rule application, evidence checking, and final judgment inside an opaque reasoning process. **LGAgent** makes those responsibilities explicit.
@@ -139,6 +142,76 @@ python tools/legal_multi_agent_prompt_demo.py \
   "A complete legal multiple-choice question with options A, B, C, and D."
 ```
 
+### 4. Run the rollback-safe LegalMCQ route
+
+The opt-in LegalMCQ route uses an answer-neutral controller, one strong solver,
+and a bounded verifier. It is disabled by default. Set
+`legal_mcq.enabled: true` and keep `lgagent_plus.enabled: false` in the YAML
+configuration, then validate the resolved model policy without making API
+calls:
+
+```bash
+.venv/bin/python tools/run_legal_mcq.py \
+  --dry-run \
+  --config examples/parameter/legal2_rag_parameter.yaml \
+  --question $'Question\nA. First option\nB. Second option'
+```
+
+Paid execution requires the separate `--execute` flag. Controller,
+primary/fallback solver, and verifier may use distinct model IDs, endpoints,
+and credentials through `LGAGENT_CONTROLLER_API_KEY`,
+`LGAGENT_SOLVER_API_KEY`, `LGAGENT_SOLVER_FALLBACK_API_KEY`, and
+`LGAGENT_LEGAL_VERIFIER_API_KEY`. Disable `legal_mcq.enabled` to restore the
+existing route. See
+[`docs/legal_mcq_super_optimization.md`](docs/legal_mcq_super_optimization.md)
+for architecture, evidence, evaluation, and rollback details.
+
+The solver emits compact `solver-v3` and accepts historical solver-v1/v2
+results read-only. `legal_mcq.solver_structured_output_mode` controls
+provider enforcement: `auto` tries strict `json_schema` and performs one
+budgeted, traced prompt-only fallback only when the provider explicitly rejects
+structured output; `json_schema` forbids fallback; `prompt_only` omits
+`response_format`.
+Each role can set its own `reasoning_effort`; the requested effort and
+observed reasoning-token share are recorded so provider compliance remains
+measurable. Omitting the field restores the provider default.
+
+Controller requests use compact `controller-v3` with per-question JSON Schema.
+The model emits facts, issues, and checks only; deterministic code binds one
+canonical claim and stable claim ID to each exact option text. Historical
+controller-v2 output remains readable, but its model-generated claims are
+discarded before Solver handoff. The frontier configuration starts at 8192 total completion
+tokens (2048 visible target plus 6144 reasoning allowance), with a 12288 cap
+for one budget-checked length recovery. These are planning allowances,
+not provider-enforced sub-budgets. See
+[`docs/legal_mcq_io_repair_20260911.md`](docs/legal_mcq_io_repair_20260911.md).
+
+Primary Solver timeouts are not retried on the same model. One configured
+fallback call shares the same question budget; two consecutive primary
+timeouts open a thread-safe circuit breaker for the rest of that Runner.
+Verifier v2 uses strict JSON Schema and a 384-token visible target with one
+bounded 512-token length recovery. See
+[`docs/legal_mcq_timeout_verifier_optimization_20260912.md`](docs/legal_mcq_timeout_verifier_optimization_20260912.md).
+The real-provider fallback and Controller v3 recovery replay is documented in
+[`docs/legal_mcq_fallback_provider_validation_20260912.md`](docs/legal_mcq_fallback_provider_validation_20260912.md).
+The frontier role selection and compatibility probes are documented in
+[`docs/legal_mcq_frontier_model_upgrade_20260912.md`](docs/legal_mcq_frontier_model_upgrade_20260912.md).
+
+LegalMCQ execution now writes `<output-stem>.calls.jsonl` alongside its results.
+Every logical call has correlated start/end events with the provider's finish
+reason, visible-content state, observed token usage, errors, and budget snapshots.
+Success and failure results both retain their Trace. Logs omit model text by
+default; `--log-model-output` includes credential-redacted visible text, never
+separate hidden-reasoning fields. See
+[`docs/legal_mcq_call_logging.md`](docs/legal_mcq_call_logging.md) for the schema,
+privacy boundaries, and the distinction between logical calls and SDK retries.
+The default call cap is seven: three for the normal path, four for a primary
+timeout plus fallback, five for one complete revision, and six if the Revision
+Solver itself needs fallback. The remaining slot can cover one protocol repair.
+Every stage reserves downstream calls and completion budget. Per-call timeouts
+are bounded by the remaining question deadline, and role clients disable
+untracked SDK retries.
+
 ## Evaluation
 
 Run the full configurable evaluator:
@@ -165,6 +238,52 @@ python tools/legal_multi_agent_ablation_auto.py \
 
 Evaluation outputs and checkpoints are written under `output/`, which is excluded from version control.
 
+### Run budgeted real-time web search
+
+Set `TAVILY_API_KEY` in `.env`, then run the isolated `web-search`
+configuration. This route disables OATH-RAG, CAPE-V, and C-LEX. It searches
+only when freshness or confidence gates fire. The first search uses a short
+legal-issue query restricted to official domains. A second exact-question
+fallback runs only when the first round has no admissible evidence. Candidate
+sources are authority/relevance scored; at most three accepted sources and
+approximately 1,800 web-context tokens are injected. Direct answer-page hits
+remain allowed but are explicitly recorded for open-web reporting.
+
+```bash
+python tools/run_task16_experiments.py \
+  --execute \
+  --profile pilot \
+  --split dev \
+  --datasets data/LexGenius.jsonl \
+  --experiments web-search \
+  --max-examples 10 \
+  --seeds 42 \
+  --concurrency 1 \
+  --output-dir output/web-search-lexgenius
+```
+
+### Calibrate and evaluate C-LEX without training
+
+C-LEX uses the option, verifier, evidence, and permutation signals already
+produced by LGAgent++. It fits a split-conformal threshold on development
+results and replays that frozen threshold on test results without additional
+model calls:
+
+```bash
+python tools/calibrate_clex.py \
+  output/task16/dev/*/joint/seed-42/results.jsonl \
+  --output output/clex/calibration.json
+
+python tools/evaluate_clex.py \
+  output/task16/test/LexGenius/joint/seed-42/results.jsonl \
+  --calibration output/clex/calibration.json \
+  --output-dir output/clex/test-ability
+```
+
+Calibration rejects non-development records, failed samples, duplicate sample
+IDs, and incompatible score versions. Original result files are never
+overwritten.
+
 ## Repository Structure
 
 ```text
@@ -178,6 +297,8 @@ LGAgent/
 │   ├── legal_multi_agent_prompt_demo.py
 │   ├── legal_multi_agent_eval_optimized.py
 │   ├── legal_multi_agent_ablation_auto.py
+│   ├── calibrate_clex.py
+│   ├── evaluate_clex.py
 │   └── baseline_eval.py
 └── data/                            # Small examples only; full datasets are external
 ```

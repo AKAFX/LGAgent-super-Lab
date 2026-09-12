@@ -500,6 +500,7 @@ AdaptiveAction = Callable[[RiskSnapshot, BudgetGuard, RunTrace], RiskSnapshot]
 class AdaptiveResult:
     selected: ReasoningCandidate
     aggregation: AggregationResult
+    candidates: tuple[CandidateSignals, ...]
     metrics: RiskMetrics
     risk: float
     route: RiskRoute
@@ -586,6 +587,7 @@ class AdaptiveRiskOrchestrator:
                 return AdaptiveResult(
                     selected=aggregation.selected,
                     aggregation=aggregation,
+                    candidates=snapshot.candidates,
                     metrics=metrics,
                     risk=risk,
                     route=route,
@@ -598,6 +600,7 @@ class AdaptiveRiskOrchestrator:
                 return AdaptiveResult(
                     selected=aggregation.selected,
                     aggregation=aggregation,
+                    candidates=snapshot.candidates,
                     metrics=metrics,
                     risk=risk,
                     route=route,
@@ -624,6 +627,7 @@ class AdaptiveRiskOrchestrator:
                 return AdaptiveResult(
                     selected=aggregation.selected,
                     aggregation=aggregation,
+                    candidates=snapshot.candidates,
                     metrics=metrics,
                     risk=risk,
                     route=route,
@@ -634,7 +638,32 @@ class AdaptiveRiskOrchestrator:
                 )
 
             guard.reserve(cost)
-            snapshot = available[route](snapshot, guard, run_trace)
+            try:
+                next_snapshot = available[route](snapshot, guard, run_trace)
+            except BudgetExceededError as exc:
+                run_trace.add_route(
+                    "budget-exhausted",
+                    f"adaptive action exhausted hard budget: {exc.reason}",
+                    {
+                        "requested_route": route.value,
+                        "selected_candidate_id": aggregation.selected.candidate_id,
+                        "fallback_to_existing_candidate": True,
+                        "budget": guard.as_dict(),
+                    },
+                )
+                return AdaptiveResult(
+                    selected=aggregation.selected,
+                    aggregation=aggregation,
+                    candidates=snapshot.candidates,
+                    metrics=metrics,
+                    risk=risk,
+                    route=route,
+                    rounds=guard.rounds_used,
+                    budget_exhausted=True,
+                    budget_exhausted_reason=exc.reason,
+                    trace=run_trace,
+                )
+            snapshot = next_snapshot
             if not isinstance(snapshot, RiskSnapshot):
                 raise TypeError("adaptive action must return RiskSnapshot")
             violation = guard.violation_reason()
@@ -659,6 +688,7 @@ class AdaptiveRiskOrchestrator:
                 return AdaptiveResult(
                     selected=aggregation.selected,
                     aggregation=aggregation,
+                    candidates=snapshot.candidates,
                     metrics=metrics,
                     risk=risk,
                     route=final_route,

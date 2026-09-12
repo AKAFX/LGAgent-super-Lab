@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from lgagent.corpus import load_jsonl_corpus
@@ -59,6 +62,80 @@ class RecordingModel:
 
 
 class ExecutionBudgetTest(unittest.TestCase):
+    def test_reasoning_effort_survives_budget_and_seed_wrapper(self) -> None:
+        provider = RecordingModel()
+        model = BudgetedSeededChatModel(
+            provider,
+            ExecutionBudget(max_calls=1, max_tokens=100, max_seconds=10),
+            base_seed=7,
+        )
+
+        model.complete(replace(request(max_tokens=10), reasoning_effort="low"))
+
+        self.assertEqual(provider.requests[0].reasoning_effort, "low")
+
+    def test_future_call_reservation_blocks_before_provider_invocation(self) -> None:
+        provider = RecordingModel()
+        budget = ExecutionBudget(
+            max_calls=2,
+            max_tokens=100,
+            max_seconds=10,
+        )
+        model = BudgetedSeededChatModel(provider, budget, base_seed=7)
+        original = request()
+        reserved = replace(
+            original,
+            metadata={
+                **original.metadata,
+                "budget_reserve_calls_after": 2,
+            },
+        )
+
+        with self.assertRaisesRegex(BudgetExceededError, "max_calls") as raised:
+            model.complete(reserved)
+
+        self.assertEqual(provider.requests, [])
+        self.assertEqual(budget.snapshot()["calls_used"], 0)
+        self.assertEqual(raised.exception.diagnostics["reserve_calls_after"], 2)
+
+    def test_inflight_call_is_cut_off_at_remaining_hard_deadline(self) -> None:
+        release = threading.Event()
+
+        class BlockingModel:
+            def __init__(self) -> None:
+                self.requests: list[ModelRequest] = []
+
+            def complete(self, model_request: ModelRequest) -> ModelResponse:
+                self.requests.append(model_request)
+                release.wait(1.0)
+                return ModelResponse("late")
+
+        provider = BlockingModel()
+        budget = ExecutionBudget(
+            max_calls=1,
+            max_tokens=100,
+            max_seconds=0.05,
+        )
+        model = BudgetedSeededChatModel(provider, budget, base_seed=7)
+        started = time.perf_counter()
+        try:
+            with self.assertRaisesRegex(
+                BudgetExceededError, "max_seconds"
+            ) as raised:
+                model.complete(request(max_tokens=10))
+        finally:
+            release.set()
+
+        self.assertLess(time.perf_counter() - started, 0.5)
+        self.assertEqual(len(provider.requests), 1)
+        self.assertGreater(provider.requests[0].timeout_seconds or 0.0, 0.0)
+        self.assertLessEqual(provider.requests[0].timeout_seconds or 1.0, 0.05)
+        self.assertTrue(
+            raised.exception.diagnostics["deadline_exceeded_during_call"]
+        )
+        self.assertTrue(raised.exception.diagnostics["model_invoked"])
+        self.assertEqual(budget.snapshot()["tokens_reserved"], 0)
+
     def test_n_plus_one_call_is_blocked_before_provider_invocation(self) -> None:
         diagnostics: list[tuple[str, dict[str, object]]] = []
         provider = RecordingModel()

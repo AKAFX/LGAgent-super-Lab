@@ -31,10 +31,16 @@ from lgagent.experiment_freeze import (
     validate_freeze_manifest,
 )
 from lgagent.experiment_runner import (
+    _ApiKeyLeasePool,
+    ExperimentRunError,
     Task16ExperimentRunner,
     _SharedRetrievalResources,
     _cited_evidence_ids,
+    _config_with_api_key,
+    _config_with_model,
     _evidence_ids,
+    _load_api_key_pool,
+    _model_clients,
     _run_sample,
     apply_experiment,
     estimate_calls,
@@ -115,6 +121,57 @@ class CorpusBuilderTest(unittest.TestCase):
 
 
 class FreezeAndRunnerTest(unittest.TestCase):
+    def test_api_key_pool_loads_deduplicated_keys_and_fallback(self) -> None:
+        self.assertEqual(
+            _load_api_key_pool(
+                {"LGAGENT_REASONING_API_KEYS": " key-a,key-b,key-a ,, "}
+            ),
+            ("key-a", "key-b"),
+        )
+        self.assertEqual(
+            _load_api_key_pool({}, fallback_key="single-key"),
+            ("single-key",),
+        )
+
+    def test_api_key_pool_leases_exclusive_slots(self) -> None:
+        pool = _ApiKeyLeasePool(("key-a", "key-b"))
+        self.assertEqual(pool.size, 2)
+        with pool.lease() as first:
+            with pool.lease() as second:
+                self.assertNotEqual(first[0], second[0])
+                self.assertEqual({first[1], second[1]}, {"key-a", "key-b"})
+        with pool.lease() as returned:
+            self.assertIn(returned[1], {"key-a", "key-b"})
+
+    def test_key_pool_override_does_not_change_noncredential_config(self) -> None:
+        config = load_lgagent_config(
+            CONFIG_PATH,
+            environ={"LLM_API_KEY": "fallback-key"},
+        )
+        replaced_config = _config_with_api_key(config, "pool-key")
+
+        self.assertEqual(replaced_config.generation.api_key, "pool-key")
+        self.assertEqual(replaced_config.generation.api_key_source, "key_pool")
+        self.assertEqual(
+            replaced_config.generation.model,
+            config.generation.model,
+        )
+        self.assertEqual(config.generation.api_key, "fallback-key")
+
+    def test_model_override_updates_generation_and_verifier(self) -> None:
+        config = load_lgagent_config(
+            CONFIG_PATH,
+            environ={"LLM_API_KEY": "test-key"},
+        )
+        replaced_config = _config_with_model(config, "qwen3-4b")
+
+        self.assertEqual(replaced_config.generation.model, "qwen3-4b")
+        self.assertEqual(
+            replaced_config.lgagent_plus.cape_v.verifier_model.model,
+            "qwen3-4b",
+        )
+        self.assertEqual(config.generation.model, "deepseek-v3")
+
     def test_domain_extraction_preserves_specific_field_priority(self) -> None:
         record = {
             "domain": "top-domain",
@@ -205,6 +262,8 @@ class FreezeAndRunnerTest(unittest.TestCase):
             ),
             diagnostics={
                 "risk_score": 0.25,
+                "b0_blind_answer": "B",
+                "b0_confidence": 0.6,
                 "counterfactual_observations": [{"eligible": True}],
                 "evidence_matrix": {
                     "options": {
@@ -230,7 +289,7 @@ class FreezeAndRunnerTest(unittest.TestCase):
             patch(
                 "lgagent.experiment_runner._model_clients",
                 return_value=(object(), object()),
-            ),
+            ) as model_clients,
             patch(
                 "lgagent.experiment_runner.LGAgentPlusRunner",
                 return_value=fake_runner,
@@ -243,12 +302,20 @@ class FreezeAndRunnerTest(unittest.TestCase):
                 project_root=ROOT_DIR,
                 reproduction={},
                 retriever=None,
+                api_key="pool-secret",
+                api_key_slot=2,
             )
 
+        effective_config = model_clients.call_args.args[0]
+        self.assertEqual(effective_config.generation.api_key, "pool-secret")
         self.assertEqual(record["status"], "ok")
+        self.assertEqual(record["reproduction"]["api_key_slot"], 2)
+        self.assertNotIn("pool-secret", json.dumps(record))
         self.assertEqual(record["domain"], "civil_law")
         self.assertEqual(record["confidence"], 0.75)
         self.assertEqual(record["risk_score"], 0.25)
+        self.assertEqual(record["b0_blind_answer"], "B")
+        self.assertEqual(record["b0_confidence"], 0.6)
         self.assertEqual(record["retrieved_evidence_ids"], ["law:1"])
         self.assertEqual(record["cited_evidence_ids"], ["law:1", "law:2"])
         self.assertEqual(record["counterfactual_observations"], [{"eligible": True}])
@@ -371,6 +438,13 @@ class FreezeAndRunnerTest(unittest.TestCase):
     def test_frozen_manifest_matches_workspace_without_copying_data(self) -> None:
         manifest = json.loads(FREEZE_PATH.read_text(encoding="utf-8"))
         validate_freeze_manifest(manifest, ROOT_DIR)
+        self.assertTrue({
+            "src/lgagent/legal_mcq/agent.py",
+            "src/lgagent/legal_mcq/models.py",
+            "src/lgagent/legal_mcq/parser.py",
+            "src/lgagent/config.py",
+            "tools/run_legal_mcq.py",
+        }.issubset(manifest["runs"]["prompt_source_sha256"]))
         self.assertEqual(manifest["runs"]["seeds"], [42, 43, 44])
         self.assertEqual(manifest["staged_protocol"]["default_profile"], "pilot")
         self.assertTrue(
@@ -389,7 +463,7 @@ class FreezeAndRunnerTest(unittest.TestCase):
         self.assertEqual(pilot["seeds"], (42,))
         self.assertEqual(
             pilot["experiment_keys"],
-            ("original", "oath-only", "cape-only", "joint"),
+            ("original", "web-search", "oath-only", "cape-only", "joint"),
         )
 
         main = EXPERIMENT_PROFILES["main"]
@@ -404,7 +478,7 @@ class FreezeAndRunnerTest(unittest.TestCase):
 
         full = resolve_plan(parse_args(["--dry-run", "--profile", "full"]))
         self.assertIsNone(full["max_examples"])
-        self.assertEqual(len(full["experiment_keys"]), 12)
+        self.assertEqual(len(full["experiment_keys"]), 13)
         overridden = resolve_plan(
             parse_args(
                 [
@@ -418,15 +492,24 @@ class FreezeAndRunnerTest(unittest.TestCase):
                     "--experiments",
                     "original",
                     "joint",
+                    "--datasets",
+                    "data/LexGenius.jsonl",
                     "--seeds",
                     "7",
+                    "--model",
+                    "qwen3-4b",
                 ]
             )
         )
         self.assertEqual(overridden["split"], "dev")
         self.assertEqual(overridden["max_examples"], 5)
         self.assertEqual(overridden["experiment_keys"], ("original", "joint"))
+        self.assertEqual(
+            overridden["dataset_paths"],
+            ("data/LexGenius.jsonl",),
+        )
         self.assertEqual(overridden["seeds"], (7,))
+        self.assertEqual(overridden["model_id"], "qwen3-4b")
 
     def test_all_task14_variants_map_to_unified_runner_settings(self) -> None:
         base = load_lgagent_config(CONFIG_PATH, environ={})
@@ -450,6 +533,27 @@ class FreezeAndRunnerTest(unittest.TestCase):
             minimum, maximum = estimate_calls(experiment)
             self.assertGreater(minimum, 0)
             self.assertGreaterEqual(maximum, minimum)
+
+    def test_model_clients_bound_transport_timeout_and_retries(self) -> None:
+        config = load_lgagent_config(
+            CONFIG_PATH,
+            environ={
+                "LLM_API_KEY": "test-key",
+                "LGAGENT_VERIFIER_API_KEY": "test-key",
+            },
+        )
+        client = object()
+        with patch("openai.OpenAI", return_value=client) as constructor:
+            reasoning, verifier = _model_clients(config)
+
+        self.assertIs(reasoning, verifier)
+        self.assertIs(reasoning._client, client)
+        constructor.assert_called_once_with(
+            api_key="test-key",
+            base_url=config.generation.base_url,
+            timeout=60.0,
+            max_retries=2,
+        )
 
     def test_dry_run_validates_without_model_client_or_accuracy_claim(self) -> None:
         record = LegalEvidence.from_mapping(
@@ -496,8 +600,24 @@ class FreezeAndRunnerTest(unittest.TestCase):
             self.assertEqual(len(report["by_experiment"]), 2)
             self.assertEqual(len(report["by_dataset"]), 3)
             self.assertTrue((temporary / "output/dry_run_report.json").is_file())
+            lexgenius_only = runner.dry_run(
+                experiment_keys=["joint"],
+                dataset_paths=[str(ROOT_DIR / "data/LexGenius.jsonl")],
+                max_examples=1,
+                seeds=[42],
+            )
+            self.assertEqual(lexgenius_only["jobs"], 1)
+            self.assertEqual(
+                lexgenius_only["resolved_plan"]["datasets"],
+                ["data/LexGenius.jsonl"],
+            )
+            with self.assertRaisesRegex(
+                ExperimentRunError,
+                "not present in the freeze manifest",
+            ):
+                runner.dry_run(dataset_paths=["data/not-frozen.jsonl"])
             full_report = runner.dry_run(max_examples=1)
-            self.assertEqual(full_report["jobs"], 108)
+            self.assertEqual(full_report["jobs"], 117)
             single_seed = runner.dry_run(
                 experiment_keys=["original", "joint"],
                 max_examples=1,
@@ -507,12 +627,12 @@ class FreezeAndRunnerTest(unittest.TestCase):
             self.assertEqual(single_seed["jobs"], 6)
             self.assertEqual(single_seed["profile"], "pilot")
             original_matrix = runner.dry_run(profile_name="full")
-            self.assertEqual(original_matrix["jobs"], 67_320)
+            self.assertEqual(original_matrix["jobs"], 42_744)
             self.assertEqual(
                 original_matrix["estimated_calls"],
                 {
-                    "minimum": 908_820,
-                    "maximum_without_retries": 1_778_370,
+                    "minimum": 585_264,
+                    "maximum_without_retries": 1_147_512,
                 },
             )
             self.assertEqual(original_matrix["cost_warning"]["level"], "critical")

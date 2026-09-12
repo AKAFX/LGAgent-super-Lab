@@ -59,6 +59,9 @@ all = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"lgagent.legal_mcq" = ["skill_specs/*.yaml"]
+
 [project.scripts]
 ultrarag = "ultrarag.client:main"
 lgagent = "ultrarag.client:main"

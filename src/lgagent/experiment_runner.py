@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import tempfile
 import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
@@ -36,6 +38,7 @@ from .experiment_freeze import (
     load_frozen_samples,
     validate_freeze_manifest,
 )
+from .legal_mcq import build_openai_role_clients
 from .model import OpenAIChatModel
 from .oath_rag import OathRagConfig, OathRagRetriever
 from .protocol import LawyerAOutput
@@ -45,6 +48,108 @@ from .serialization import to_jsonable
 
 class ExperimentRunError(RuntimeError):
     """Raised when an experiment cannot run without violating its contract."""
+
+
+def _load_api_key_pool(
+    environ: Mapping[str, str],
+    *,
+    pool_variable: str = "LGAGENT_REASONING_API_KEYS",
+    fallback_key: str = "",
+) -> tuple[str, ...]:
+    raw_pool = str(environ.get(pool_variable, ""))
+    candidates = (
+        [item.strip() for item in raw_pool.split(",")]
+        if raw_pool.strip()
+        else [fallback_key.strip()]
+    )
+    return tuple(dict.fromkeys(item for item in candidates if item))
+
+
+class _ApiKeyLeasePool:
+    """Give each in-flight sample exclusive use of one API key."""
+
+    def __init__(self, keys: Sequence[str]) -> None:
+        available = tuple(key.strip() for key in keys if key.strip())
+        if not available:
+            raise ExperimentRunError("API key pool cannot be empty")
+        self._size = len(available)
+        self._available: queue.Queue[tuple[int, str]] = queue.Queue()
+        for slot, key in enumerate(available):
+            self._available.put((slot, key))
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    @contextmanager
+    def lease(self):
+        credential = self._available.get()
+        try:
+            yield credential
+        finally:
+            self._available.put(credential)
+
+
+def _config_with_api_key(config: LGAgentConfig, api_key: str) -> LGAgentConfig:
+    previous_generation_key = config.generation.api_key
+    generation = replace(
+        config.generation,
+        api_key=api_key,
+        api_key_source="key_pool",
+    )
+    cape = config.lgagent_plus.cape_v
+    verifier = cape.verifier_model
+    if verifier is not None and (
+        not verifier.api_key or verifier.api_key == config.generation.api_key
+    ):
+        verifier = replace(
+            verifier,
+            api_key=api_key,
+            api_key_source="key_pool",
+        )
+        cape = replace(cape, verifier_model=verifier)
+
+    legal = config.legal_mcq
+
+    def update_legal_role(role_config):
+        if role_config is None:
+            return None
+        if not role_config.api_key or role_config.api_key == previous_generation_key:
+            return replace(
+                role_config,
+                api_key=api_key,
+                api_key_source="key_pool",
+            )
+        return role_config
+
+    legal = replace(
+        legal,
+        controller_model=update_legal_role(legal.controller_model),
+        solver_model=update_legal_role(legal.solver_model),
+        solver_fallback_model=update_legal_role(legal.solver_fallback_model),
+        verifier_model=update_legal_role(legal.verifier_model),
+    )
+    return replace(
+        config,
+        generation=generation,
+        lgagent_plus=replace(config.lgagent_plus, cape_v=cape),
+        legal_mcq=legal,
+    )
+
+
+def _config_with_model(config: LGAgentConfig, model_id: str) -> LGAgentConfig:
+    normalized = model_id.strip()
+    if not normalized:
+        raise ExperimentRunError("model override cannot be empty")
+    cape = config.lgagent_plus.cape_v
+    verifier = cape.verifier_model
+    if verifier is not None:
+        cape = replace(cape, verifier_model=replace(verifier, model=normalized))
+    return replace(
+        config,
+        generation=replace(config.generation, model=normalized),
+        lgagent_plus=replace(config.lgagent_plus, cape_v=cape),
+    )
 
 
 def _retriever_config(
@@ -223,6 +328,10 @@ def apply_experiment(
     corpus_path: str | Path,
 ) -> LGAgentConfig:
     plus = base.lgagent_plus
+    web_search = replace(
+        plus.web_search,
+        enabled=experiment.web_search_enabled,
+    )
     oath = replace(
         plus.oath_rag,
         enabled=experiment.oath_rag_enabled,
@@ -260,6 +369,7 @@ def apply_experiment(
             plus,
             enabled=experiment.lgagent_plus_enabled,
             seed=seed,
+            web_search=web_search,
             oath_rag=oath,
             cape_v=cape,
             risk=replace(plus.risk, budget=budget),
@@ -348,7 +458,12 @@ def _model_clients(config: LGAgentConfig) -> tuple[OpenAIChatModel, OpenAIChatMo
             "no API key is configured; use --dry-run or set YAML api_key/LLM_API_KEY"
         )
     reasoning = OpenAIChatModel(
-        OpenAI(api_key=generation.api_key, base_url=generation.base_url)
+        OpenAI(
+            api_key=generation.api_key,
+            base_url=generation.base_url,
+            timeout=60.0,
+            max_retries=2,
+        )
     )
     verifier_config = config.lgagent_plus.cape_v.verifier_model
     if verifier_config is None or (
@@ -363,6 +478,8 @@ def _model_clients(config: LGAgentConfig) -> tuple[OpenAIChatModel, OpenAIChatMo
             OpenAI(
                 api_key=verifier_config.api_key,
                 base_url=verifier_config.base_url,
+                timeout=60.0,
+                max_retries=2,
             )
         )
     return reasoning, verifier
@@ -384,6 +501,16 @@ def _redact_error(message: str, config: LGAgentConfig) -> str:
             if config.lgagent_plus.cape_v.verifier_model is not None
             else ""
         ),
+        *(
+            role.api_key
+            for role in (
+                config.legal_mcq.controller_model,
+                config.legal_mcq.solver_model,
+                config.legal_mcq.solver_fallback_model,
+                config.legal_mcq.verifier_model,
+            )
+            if role is not None
+        ),
     }
     for key in keys:
         if key:
@@ -399,14 +526,31 @@ def _run_sample(
     project_root: Path,
     reproduction: Mapping[str, Any],
     retriever: OathRagRetriever | None = None,
+    api_key: str | None = None,
+    api_key_slot: int | None = None,
 ) -> dict[str, Any]:
+    if api_key is not None:
+        config = _config_with_api_key(config, api_key)
+    if api_key_slot is not None:
+        reproduction = {**reproduction, "api_key_slot": api_key_slot}
     question = str(sample.record["question"])
     golden = [str(value) for value in sample.record.get("golden_answers", [])]
     domain = extract_sample_domain(sample.record)
     started = perf_counter()
     results: list[Any] = []
     try:
-        reasoning, verifier = _model_clients(config)
+        legal_clients = (
+            build_openai_role_clients(config)
+            if config.legal_mcq.enabled
+            else None
+        )
+        if legal_clients is None:
+            reasoning, verifier = _model_clients(config)
+            evaluation = reasoning
+        else:
+            reasoning = legal_clients.controller
+            evaluation = legal_clients.solver
+            verifier = legal_clients.verifier
         evidence_pipeline: EvidenceAuditPipeline | None = None
         if config.lgagent_plus.enabled and config.lgagent_plus.oath_rag.enabled:
             if retriever is None:
@@ -438,8 +582,20 @@ def _run_sample(
             runner = LGAgentPlusRunner(
                 config,
                 reasoning_model=reasoning,
-                evaluation_model=reasoning,
+                evaluation_model=evaluation,
                 verifier_model=verifier,
+                legal_controller_model=(
+                    legal_clients.controller if legal_clients else None
+                ),
+                legal_solver_model=(
+                    legal_clients.solver if legal_clients else None
+                ),
+                legal_solver_fallback_model=(
+                    legal_clients.solver_fallback if legal_clients else None
+                ),
+                legal_verifier_model=(
+                    legal_clients.verifier if legal_clients else None
+                ),
                 evidence_pipeline=evidence_pipeline,
                 project_root=project_root,
                 evidence_lanes=experiment.evidence_lanes or (
@@ -494,6 +650,12 @@ def _run_sample(
                 "domain": domain,
                 "confidence": confidence,
                 "risk_score": risk_score,
+                "b0_blind_answer": diagnostics.get("b0_blind_answer"),
+                "b0_confidence": diagnostics.get("b0_confidence"),
+                "web_search": diagnostics.get("web_search", {}),
+                "clex_option_scores": diagnostics.get("clex_option_scores", {}),
+                "clex_score_version": diagnostics.get("clex_score_version"),
+                "clex": diagnostics.get("clex", {}),
                 "counterfactual_observations": diagnostics.get(
                     "counterfactual_observations", []
                 ),
@@ -506,6 +668,16 @@ def _run_sample(
             },
         )
     except Exception as exc:
+        # #region debug-point A-D:sample-failure-budget-and-stage
+        try:
+            import urllib.request as _debug_urlrequest
+            _debug_env = (project_root / ".dbg/joint-budget-failures.env").read_text(encoding="utf-8")
+            _debug_url = next(line.split("=", 1)[1] for line in _debug_env.splitlines() if line.startswith("DEBUG_SERVER_URL="))
+            _debug_payload = json.dumps({"sessionId": "joint-budget-failures", "runId": "post-fix", "hypothesisId": "A-B-C-D", "location": "experiment_runner.py:_run_sample", "msg": "[DEBUG] Joint sample failed", "data": {"sample_id": sample.sample_id, "error_type": type(exc).__name__, "error_message": _redact_error(str(exc), config), "elapsed_ms": (perf_counter() - started) * 1000, "diagnostics": getattr(exc, "diagnostics", {})}}).encode("utf-8")
+            _debug_urlrequest.urlopen(_debug_urlrequest.Request(_debug_url, data=_debug_payload, headers={"Content-Type": "application/json"}), timeout=0.2).read()
+        except Exception:
+            pass
+        # #endregion
         record = build_result_record(
             sample_id=sample.sample_id,
             prediction="",
@@ -525,6 +697,29 @@ def _run_sample(
             },
         )
     return record
+
+
+def _run_sample_with_key_pool(
+    sample: FrozenSample,
+    *,
+    key_pool: _ApiKeyLeasePool,
+    config: LGAgentConfig,
+    experiment: AblationExperiment,
+    project_root: Path,
+    reproduction: Mapping[str, Any],
+    retriever: OathRagRetriever | None,
+) -> dict[str, Any]:
+    with key_pool.lease() as (slot, api_key):
+        return _run_sample(
+            sample,
+            config=config,
+            experiment=experiment,
+            project_root=project_root,
+            reproduction=reproduction,
+            retriever=retriever,
+            api_key=api_key,
+            api_key_slot=slot,
+        )
 
 
 class Task16ExperimentRunner:
@@ -589,23 +784,60 @@ class Task16ExperimentRunner:
             raise ExperimentRunError("seeds must be unique")
         return selected
 
+    def _select_datasets(
+        self,
+        freeze: Mapping[str, Any],
+        dataset_paths: Sequence[str] | None,
+    ) -> tuple[tuple[str, Mapping[str, Any]], ...]:
+        available = freeze["primary_datasets"]
+        if not dataset_paths:
+            return tuple(available.items())
+        selected: list[str] = []
+        for value in dataset_paths:
+            path = Path(value)
+            if path.is_absolute():
+                try:
+                    relative = path.resolve().relative_to(self.root).as_posix()
+                except ValueError as exc:
+                    raise ExperimentRunError(
+                        f"dataset is outside the project root: {value}"
+                    ) from exc
+            else:
+                relative = path.as_posix()
+                while relative.startswith("./"):
+                    relative = relative[2:]
+            if relative not in available:
+                raise ExperimentRunError(
+                    f"dataset is not present in the freeze manifest: {value}"
+                )
+            if relative in selected:
+                raise ExperimentRunError(f"duplicate dataset selection: {value}")
+            selected.append(relative)
+        return tuple((relative, available[relative]) for relative in selected)
+
     def dry_run(
         self,
         *,
         split: str = "test",
         experiment_keys: Sequence[str] | None = None,
+        dataset_paths: Sequence[str] | None = None,
         max_examples: int | None = None,
         seeds: Sequence[int] | None = None,
         profile_name: str | None = None,
+        model_id: str | None = None,
     ) -> dict[str, Any]:
         config, freeze, matrix, corpus = self._inputs()
+        if model_id is not None:
+            config = _config_with_model(config, model_id)
+            matrix = build_task14_matrix(config)
         experiments = self._select_experiments(matrix, experiment_keys)
+        datasets = self._select_datasets(freeze, dataset_paths)
         run_seeds = self._select_seeds(freeze, seeds)
         rows = []
         by_experiment: dict[str, dict[str, Any]] = {}
         by_dataset: dict[str, dict[str, Any]] = {}
         total_calls_min = total_calls_max = total_jobs = 0
-        for relative, dataset in freeze["primary_datasets"].items():
+        for relative, dataset in datasets:
             samples = load_frozen_samples(
                 self.root / relative,
                 split=split,
@@ -683,8 +915,10 @@ class Task16ExperimentRunner:
             "resolved_plan": {
                 "split": split,
                 "experiment_keys": [item.key for item in experiments],
+                "datasets": [relative for relative, _ in datasets],
                 "max_examples_per_dataset": max_examples,
                 "seeds": list(run_seeds),
+                "model_id": config.generation.model,
             },
             "matrix_id": stable_hash([item.as_dict() for item in experiments])[:24],
             "corpus": {
@@ -712,21 +946,51 @@ class Task16ExperimentRunner:
         *,
         split: str = "test",
         experiment_keys: Sequence[str] | None = None,
+        dataset_paths: Sequence[str] | None = None,
         max_examples: int | None = None,
         seeds: Sequence[int] | None = None,
         profile_name: str | None = None,
+        model_id: str | None = None,
         concurrency: int = 1,
         checkpoint_every: int = 10,
     ) -> dict[str, Any]:
         config, freeze, matrix, _ = self._inputs()
-        if not config.generation.api_key:
+        if model_id is not None:
+            config = _config_with_model(config, model_id)
+            matrix = build_task14_matrix(config)
+        api_keys = _load_api_key_pool(
+            os.environ,
+            fallback_key=config.generation.api_key,
+        )
+        if not api_keys:
             raise ExperimentRunError(
                 "no API key is configured; paid execution was not started"
             )
+        explicit_key_pool = bool(
+            os.environ.get("LGAGENT_REASONING_API_KEYS", "").strip()
+        )
+        if explicit_key_pool and concurrency > len(api_keys):
+            raise ExperimentRunError(
+                "concurrency cannot exceed LGAGENT_REASONING_API_KEYS size "
+                f"({len(api_keys)})"
+            )
+        lease_keys = (
+            api_keys
+            if explicit_key_pool
+            else api_keys * max(1, concurrency)
+        )
+        key_pool = _ApiKeyLeasePool(lease_keys)
         experiments = self._select_experiments(matrix, experiment_keys)
+        datasets = self._select_datasets(freeze, dataset_paths)
         run_seeds = self._select_seeds(freeze, seeds)
+        if any(item.web_search_enabled for item in experiments):
+            key_name = config.lgagent_plus.web_search.api_key_env
+            if not os.environ.get(key_name):
+                raise ExperimentRunError(
+                    f"web-search requires environment variable {key_name}"
+                )
         summaries: list[dict[str, Any]] = []
-        for relative, dataset in freeze["primary_datasets"].items():
+        for relative, dataset in datasets:
             samples = load_frozen_samples(
                 self.root / relative,
                 split=split,
@@ -752,6 +1016,11 @@ class Task16ExperimentRunner:
                             {
                                 "base": freeze["config"]["sha256"],
                                 "experiment": experiment.as_dict(),
+                                **(
+                                    {"model_override": model_id}
+                                    if model_id is not None
+                                    else {}
+                                ),
                             }
                         ),
                         dataset_hash=dataset["sha256"],
@@ -800,8 +1069,9 @@ class Task16ExperimentRunner:
                     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
                         futures = {
                             pool.submit(
-                                _run_sample,
+                                _run_sample_with_key_pool,
                                 sample,
+                                key_pool=key_pool,
                                 config=run_config,
                                 experiment=experiment,
                                 project_root=self.root,
@@ -845,8 +1115,12 @@ class Task16ExperimentRunner:
             "resolved_plan": {
                 "split": split,
                 "experiment_keys": [item.key for item in experiments],
+                "datasets": [relative for relative, _ in datasets],
                 "max_examples_per_dataset": max_examples,
                 "seeds": list(run_seeds),
+                "model_id": config.generation.model,
+                "concurrency": concurrency,
+                "api_key_pool_size": len(api_keys),
             },
             "runs": summaries,
         }

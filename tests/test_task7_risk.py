@@ -474,6 +474,31 @@ class AdaptiveOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.selected.answer, "D")
         self.assertEqual(result.trace.routes[-1].route, "budget-exhausted")
 
+    def test_budget_error_inside_optional_action_returns_existing_candidate(self) -> None:
+        initial = self.snapshot(("A", "A", "B"))
+
+        def verify_more(snapshot, guard, trace):
+            raise BudgetExceededError("max_tokens")
+
+        result = AdaptiveRiskOrchestrator(
+            weights=self.weights,
+            thresholds=self.thresholds,
+            budget_limits=BudgetLimits(5, 100, 2, 10),
+            action_costs={RiskRoute.VERIFY_MORE: BudgetCost(1, 10)},
+        ).run(
+            initial,
+            actions={RiskRoute.VERIFY_MORE: verify_more},
+        )
+
+        self.assertTrue(result.budget_exhausted)
+        self.assertEqual(result.budget_exhausted_reason, "max_tokens")
+        self.assertEqual(result.selected.candidate_id, "candidate-0")
+        self.assertEqual(result.rounds, 1)
+        self.assertEqual(result.trace.routes[-1].route, "budget-exhausted")
+        self.assertTrue(
+            result.trace.routes[-1].details["fallback_to_existing_candidate"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

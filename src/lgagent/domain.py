@@ -236,6 +236,13 @@ class SingleQuestionRunner:
         question: str,
         *,
         retrieved_docs: list[str] | None = None,
+        retrieved_docs_provider: (
+            Callable[
+                [str, LawyerAOutput, JudgeOutput, B0Output, RunTrace],
+                tuple[list[str], Mapping[str, Any]],
+            ]
+            | None
+        ) = None,
         evidence_matrix: AuditedEvidenceMatrix | None = None,
         evidence_provider: (
             Callable[[LawyerAOutput, RunTrace], AuditedEvidenceMatrix] | None
@@ -265,7 +272,7 @@ class SingleQuestionRunner:
                     "evidence_matrix and evidence_provider are mutually exclusive"
                 )
             evidence_matrix = evidence_provider(lawyer_a, run_trace)
-        judge_text, _ = self._invoke(
+        judge_text, judge = self._invoke(
             self.reasoning_model,
             self.reasoning_config,
             "judge",
@@ -293,6 +300,19 @@ class SingleQuestionRunner:
             run_trace,
             max_tokens=256,
         )
+        retrieval_diagnostics: Mapping[str, Any] | None = None
+        if retrieved_docs_provider is not None:
+            if retrieved_docs is not None or evidence_matrix is not None:
+                raise ValueError(
+                    "retrieved_docs_provider cannot be combined with preloaded evidence"
+                )
+            retrieved_docs, retrieval_diagnostics = retrieved_docs_provider(
+                question,
+                lawyer_a,
+                judge,
+                b0,
+                run_trace,
+            )
 
         current_judge = judge_text
         _, b1 = self._run_b1(
@@ -362,6 +382,8 @@ class SingleQuestionRunner:
         )
         if evidence_matrix is not None:
             diagnostics["evidence_matrix"] = evidence_matrix.as_dict()
+        if retrieval_diagnostics is not None:
+            diagnostics["web_search"] = dict(retrieval_diagnostics)
         return SingleQuestionResult(
             final_answer=b1.final_answer,
             lawyer_a_output=lawyer_a_text,
@@ -410,6 +432,13 @@ def run_single_question(
     reasoning_config: ModelConfig | Mapping[str, Any],
     evaluation_config: ModelConfig | Mapping[str, Any],
     retrieved_docs: list[str] | None = None,
+    retrieved_docs_provider: (
+        Callable[
+            [str, LawyerAOutput, JudgeOutput, B0Output, RunTrace],
+            tuple[list[str], Mapping[str, Any]],
+        ]
+        | None
+    ) = None,
     evidence_matrix: AuditedEvidenceMatrix | None = None,
     evidence_provider: (
         Callable[[LawyerAOutput, RunTrace], AuditedEvidenceMatrix] | None
@@ -425,6 +454,7 @@ def run_single_question(
     ).run(
         question,
         retrieved_docs=retrieved_docs,
+        retrieved_docs_provider=retrieved_docs_provider,
         evidence_matrix=evidence_matrix,
         evidence_provider=evidence_provider,
     )

@@ -14,11 +14,13 @@ if str(SRC_DIR) not in sys.path:
 
 from lgagent.config import (
     CapeVSettings,
+    ClexSettings,
     LGAgentConfig,
     LGAgentPlusConfig,
     ModelConfig,
     OathRagSettings,
     RiskSettings,
+    WebSearchSettings,
 )
 from lgagent.corpus import CorpusValidationError
 from lgagent.model import ModelRequest, ModelResponse
@@ -187,8 +189,10 @@ class EvaluationModel:
         self.events = events
         self.cape_answers = itertools.cycle(("A", "B"))
         self.cape_requests: list[ModelRequest] = []
+        self.requests: list[ModelRequest] = []
 
     def complete(self, request: ModelRequest) -> ModelResponse:
+        self.requests.append(request)
         agent = str(request.metadata["agent"])
         self.events.append(agent)
         if agent == "lawyer_b0":
@@ -260,6 +264,8 @@ def config(
     initial_candidates: int = 2,
     permutation_count: int = 0,
     enable_counterfactual: bool = False,
+    clex_calibration_path: Path | None = None,
+    web_search: bool = False,
     risk_thresholds: RiskThresholds | None = None,
     risk_budget: BudgetLimits | None = None,
 ) -> LGAgentConfig:
@@ -288,6 +294,18 @@ def config(
                 thresholds=risk_thresholds or RiskThresholds(),
                 budget=risk_budget or BudgetLimits(),
             ),
+            clex=ClexSettings(
+                enabled=clex_calibration_path is not None,
+                calibration_path=(
+                    str(clex_calibration_path)
+                    if clex_calibration_path is not None
+                    else ""
+                ),
+                alpha=0.1,
+                min_calibration_size=30,
+                group_field="domain",
+            ),
+            web_search=WebSearchSettings(enabled=web_search),
         ),
     )
 
@@ -392,6 +410,125 @@ class Task17IntegrationTest(unittest.TestCase):
         )
         self.assertEqual(len(joint.diagnostics["verification_reports"]), 2)
 
+    def test_clex_uses_frozen_calibration_without_extra_model_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            corpus_path = root / "unused.jsonl"
+            calibration_path = root / "clex.json"
+            calibration_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "score_version": "clex-option-conformity-v1",
+                        "alpha": 0.1,
+                        "global_threshold": 0.45,
+                        "global_count": 100,
+                        "group_field": "domain",
+                        "group_thresholds": {"civil_law": 0.45},
+                        "group_counts": {"civil_law": 50},
+                        "records_sha256": "fixture",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            events: list[str] = []
+            result = LGAgentPlusRunner(
+                config(
+                    corpus_path,
+                    enabled=True,
+                    oath=False,
+                    cape=True,
+                    initial_candidates=2,
+                    permutation_count=0,
+                    clex_calibration_path=calibration_path,
+                    risk_thresholds=RiskThresholds(low=0.99, high=1.0),
+                    risk_budget=BudgetLimits(
+                        max_calls=100,
+                        max_tokens=1_000_000,
+                        max_rounds=1,
+                        max_seconds=120.0,
+                    ),
+                ),
+                reasoning_model=ReasoningModel(events),
+                evaluation_model=EvaluationModel(events),
+                verifier_model=VerifierModel(events),
+            ).run(QUESTION)
+
+        self.assertEqual(result.final_answer, "B")
+        self.assertEqual(result.diagnostics["clex"]["prediction_set"], ["B"])
+        self.assertEqual(
+            result.diagnostics["clex"]["threshold_source"],
+            "domain:civil_law",
+        )
+        self.assertEqual(events.count("cape_v_candidate"), 2)
+        self.assertIn("clex", [item.route for item in result.trace.routes])
+
+    def test_clex_invalid_artifact_fails_before_any_model_call(self) -> None:
+        events: list[str] = []
+        missing = ROOT_DIR / "does-not-exist-clex-calibration.json"
+        with self.assertRaises(FileNotFoundError):
+            LGAgentPlusRunner(
+                config(
+                    ROOT_DIR / "unused-corpus.jsonl",
+                    enabled=True,
+                    oath=False,
+                    cape=True,
+                    clex_calibration_path=missing,
+                ),
+                reasoning_model=ReasoningModel(events),
+                evaluation_model=EvaluationModel(events),
+                verifier_model=VerifierModel(events),
+            ).run(QUESTION)
+
+        self.assertEqual(events, [])
+
+    def test_web_search_runs_without_oath_or_cape(self) -> None:
+        class FakeWebSearch:
+            def retrieve(self, question, analysis, judge, b0, trace):
+                _ = question, analysis, judge, b0
+                trace.add_route("web-search", "fixture")
+                return type(
+                    "Outcome",
+                    (),
+                    {
+                        "documents": (
+                            "[UNTRUSTED WEB EVIDENCE]\n"
+                            "evidence_id: web:1\n"
+                            "url: https://gov.example/rule\n"
+                            "content: current rule",
+                        ),
+                        "as_dict": lambda self: {
+                            "searched": True,
+                            "estimated_context_tokens": 20,
+                        },
+                    },
+                )()
+
+        with tempfile.TemporaryDirectory() as directory:
+            events: list[str] = []
+            evaluation = EvaluationModel(events)
+            result = LGAgentPlusRunner(
+                config(
+                    Path(directory) / "unused.jsonl",
+                    enabled=True,
+                    oath=False,
+                    cape=False,
+                    web_search=True,
+                ),
+                reasoning_model=ReasoningModel(events),
+                evaluation_model=evaluation,
+                web_search_pipeline=FakeWebSearch(),
+            ).run(QUESTION)
+
+        self.assertEqual(result.diagnostics["pipeline_route"], "web-search-only")
+        self.assertTrue(result.diagnostics["web_search"]["searched"])
+        self.assertIn(
+            "web:1",
+            evaluation.requests[-1].messages[-1].content,
+        )
+        self.assertNotIn("evidence_auditor", events)
+        self.assertNotIn("cape_v_candidate", events)
+
     def test_legacy_lawyer_a_output_remains_accepted(self) -> None:
         from lgagent.protocol import LawyerAOutput
 
@@ -400,6 +537,30 @@ class Task17IntegrationTest(unittest.TestCase):
         self.assertIsNone(parsed.case_date)
         self.assertEqual(parsed.option_claims["A"].claim, "alpha ownership")
         self.assertEqual(parsed.option_claims["A"].elements, ())
+
+    def test_oath_uses_default_jurisdiction_when_analysis_omits_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            corpus_path = Path(directory) / "corpus.jsonl"
+            write_corpus(corpus_path)
+            events: list[str] = []
+
+            result = LGAgentPlusRunner(
+                config(
+                    corpus_path,
+                    enabled=True,
+                    oath=True,
+                    cape=False,
+                ),
+                reasoning_model=ReasoningModel(events, legacy_analysis=True),
+                evaluation_model=EvaluationModel(events),
+            ).run(QUESTION)
+
+        self.assertEqual(result.final_answer, "A")
+        self.assertEqual(
+            result.diagnostics["evidence_matrix"]["retrieval_status"],
+            "SUCCESS",
+        )
+        self.assertIn("evidence_auditor", events)
 
     def test_permutation_probe_does_not_vote_or_run_five_verifiers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

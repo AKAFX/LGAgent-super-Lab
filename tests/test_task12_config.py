@@ -97,6 +97,30 @@ def valid_payload() -> dict[str, object]:
                 "max_total_tokens": 32768,
                 "max_wall_time_seconds": 90,
             },
+            "clex": {
+                "enabled": False,
+                "calibration_path": "docs/clex_calibration.json",
+                "alpha": 0.1,
+                "min_calibration_size": 30,
+                "group_field": "domain",
+            },
+            "web_search": {
+                "enabled": False,
+                "provider": "tavily",
+                "base_url": "https://api.tavily.com/search",
+                "api_key_env": "TAVILY_API_KEY",
+                "confidence_threshold": 0.65,
+                "max_searches": 2,
+                "candidate_results": 5,
+                "max_results": 3,
+                "chunks_per_source": 1,
+                "max_query_chars": 240,
+                "max_context_tokens": 1800,
+                "max_chars_per_result": 600,
+                "min_relevance_score": 0.35,
+                "timeout_seconds": 15,
+                "failure_mode": "closed_book",
+            },
         },
     }
 
@@ -142,6 +166,52 @@ class TypedConfigTest(ConfigFileMixin, unittest.TestCase):
             sum(config.lgagent_plus.risk.weights.normalized.values()), 1.0
         )
         self.assertEqual(config.lgagent_plus.risk.budget.max_seconds, 90.0)
+        self.assertFalse(config.lgagent_plus.clex.enabled)
+        self.assertFalse(config.lgagent_plus.web_search.enabled)
+        self.assertEqual(config.lgagent_plus.web_search.max_results, 3)
+        self.assertEqual(
+            config.lgagent_plus.clex.calibration_path,
+            "docs/clex_calibration.json",
+        )
+
+    def test_clex_requires_cape_and_a_calibration_artifact(self) -> None:
+        payload = valid_payload()
+        payload["lgagent_plus"]["clex"]["enabled"] = True  # type: ignore[index]
+        payload["lgagent_plus"]["clex"]["calibration_path"] = ""  # type: ignore[index]
+        with self.assertRaisesRegex(ConfigurationError, "calibration_path"):
+            self.load(payload)
+
+        payload = valid_payload()
+        payload["lgagent_plus"]["clex"]["enabled"] = True  # type: ignore[index]
+        payload["lgagent_plus"]["cape_v"]["enabled"] = False  # type: ignore[index]
+        with self.assertRaisesRegex(ConfigurationError, "requires"):
+            self.load(payload)
+
+    def test_clex_alpha_must_be_strictly_between_zero_and_one(self) -> None:
+        for alpha in (0.0, 1.0):
+            with self.subTest(alpha=alpha):
+                payload = valid_payload()
+                payload["lgagent_plus"]["clex"]["alpha"] = alpha  # type: ignore[index]
+                with self.assertRaisesRegex(ConfigurationError, "strictly"):
+                    self.load(payload)
+
+    def test_web_search_isolated_from_oath_cape_and_clex(self) -> None:
+        payload = valid_payload()
+        payload["lgagent_plus"]["web_search"]["enabled"] = True  # type: ignore[index]
+        with self.assertRaisesRegex(ConfigurationError, "isolated experiment"):
+            self.load(payload)
+
+        payload["lgagent_plus"]["oath_rag"]["enabled"] = False  # type: ignore[index]
+        payload["lgagent_plus"]["cape_v"]["enabled"] = False  # type: ignore[index]
+        config = self.load(payload)
+        self.assertTrue(config.lgagent_plus.web_search.enabled)
+
+    def test_web_search_candidate_pool_covers_final_evidence_limit(self) -> None:
+        payload = valid_payload()
+        payload["lgagent_plus"]["web_search"]["candidate_results"] = 2  # type: ignore[index]
+        payload["lgagent_plus"]["web_search"]["max_results"] = 3  # type: ignore[index]
+        with self.assertRaisesRegex(ConfigurationError, "at least max_results"):
+            self.load(payload)
 
     def test_generation_yaml_key_precedence_remains_compatible(self) -> None:
         payload = valid_payload()
@@ -159,6 +229,35 @@ class TypedConfigTest(ConfigFileMixin, unittest.TestCase):
         self.assertEqual(fallback.generation.api_key, "environment-key")
         self.assertEqual(fallback.generation.api_key_source, "environment")
 
+    def test_legal_role_reasoning_effort_is_typed_and_inherited(self) -> None:
+        payload = valid_payload()
+        payload["lgagent_plus"]["enabled"] = False  # type: ignore[index]
+        payload["generation"]["sampling_params"]["reasoning_effort"] = "medium"  # type: ignore[index]
+        payload["legal_mcq"] = {
+            "enabled": True,
+            "controller_model": {"model_name": "controller"},
+            "solver_model": {
+                "model_name": "solver",
+                "reasoning_effort": "low",
+            },
+            "verifier_model": {"model_name": "verifier"},
+        }
+
+        config = self.load(payload)
+
+        assert config.legal_mcq.controller_model is not None
+        assert config.legal_mcq.solver_model is not None
+        assert config.legal_mcq.verifier_model is not None
+        self.assertEqual(
+            config.legal_mcq.controller_model.reasoning_effort,
+            "medium",
+        )
+        self.assertEqual(config.legal_mcq.solver_model.reasoning_effort, "low")
+        self.assertEqual(
+            config.legal_mcq.verifier_model.reasoning_effort,
+            "medium",
+        )
+
     def test_repository_yaml_is_offline_safe_and_defaults_to_baseline(self) -> None:
         config = load_lgagent_config(
             ROOT_DIR / "examples" / "parameter" / "legal2_rag_parameter.yaml",
@@ -169,11 +268,31 @@ class TypedConfigTest(ConfigFileMixin, unittest.TestCase):
         self.assertTrue(route.corrected_baseline)
         self.assertFalse(route.oath_rag_enabled)
         self.assertFalse(route.cape_v_enabled)
+        self.assertEqual(
+            config.lgagent_plus.oath_rag.default_jurisdiction,
+            "CN",
+        )
         self.assertEqual(config.generation.api_key, "")
         verifier_model = config.lgagent_plus.cape_v.verifier_model
         self.assertIsNotNone(verifier_model)
         assert verifier_model is not None
         self.assertEqual(verifier_model.api_key, "")
+        legal = config.legal_mcq
+        assert legal.controller_model is not None
+        assert legal.solver_model is not None
+        assert legal.solver_fallback_model is not None
+        assert legal.verifier_model is not None
+        self.assertEqual(legal.controller_model.model, "Qwen/Qwen3.7-Flash")
+        self.assertEqual(legal.solver_model.model, "gpt-5.6-sol")
+        self.assertEqual(
+            legal.solver_fallback_model.model,
+            "Qwen/Qwen3.8-Max-0902",
+        )
+        self.assertEqual(legal.verifier_model.model, "Qwen/Qwen3.7-Flash")
+        self.assertEqual(legal.solver_model.reasoning_effort, "high")
+        self.assertEqual(legal.solver_fallback_model.reasoning_effort, "medium")
+        self.assertEqual(legal.max_total_tokens, 65536)
+        self.assertEqual(legal.max_wall_time_seconds, 360)
 
 
 class StrictValidationTest(ConfigFileMixin, unittest.TestCase):
@@ -193,6 +312,14 @@ class StrictValidationTest(ConfigFileMixin, unittest.TestCase):
         self.assert_invalid(
             lambda p: p["lgagent_plus"]["risk"].update(low_threshold="0.3"),  # type: ignore[index]
             "must be a number",
+        )
+
+    def test_rejects_empty_default_jurisdiction(self) -> None:
+        self.assert_invalid(
+            lambda p: p["lgagent_plus"]["oath_rag"].update(  # type: ignore[index]
+                default_jurisdiction=" "
+            ),
+            "default_jurisdiction must be a non-empty string",
         )
 
     def test_rejects_negative_and_all_zero_risk_weights(self) -> None:
@@ -244,6 +371,93 @@ class StrictValidationTest(ConfigFileMixin, unittest.TestCase):
             "requires at least 29952",
         )
 
+    def test_rejects_legal_call_timeout_larger_than_question_deadline(self) -> None:
+        def mutate(payload):
+            payload["legal_mcq"] = {
+                "enabled": False,
+                "max_wall_time_seconds": 30,
+                "model_call_timeout_seconds": 31,
+            }
+
+        self.assert_invalid(mutate, "cannot exceed")
+
+    def test_rejects_unknown_solver_structured_output_mode(self) -> None:
+        def mutate(payload):
+            payload["legal_mcq"] = {
+                "enabled": False,
+                "solver_structured_output_mode": "best-effort",
+            }
+
+        self.assert_invalid(mutate, "solver_structured_output_mode")
+
+    def test_rejects_invalid_output_budget_or_controller_mode(self) -> None:
+        for key, value in (
+            ("solver_visible_output_tokens", 0),
+            ("solver_reasoning_allowance_tokens", -1),
+            ("auxiliary_reasoning_reserve_tokens", True),
+            ("controller_structured_output_mode", "best-effort"),
+            ("verifier_structured_output_mode", "best-effort"),
+            ("solver_timeout_retries", 1),
+            ("solver_timeout_circuit_breaker", 0),
+            ("skip_verifier_on_deterministic_errors", "true"),
+        ):
+            with self.subTest(key=key):
+                def mutate(payload):
+                    payload["legal_mcq"] = {key: value}
+                self.assert_invalid(mutate, key)
+
+    def test_rejects_invalid_role_timeout_and_verifier_retry_budget(self) -> None:
+        def timeout(payload):
+            payload["legal_mcq"] = {
+                "max_wall_time_seconds": 60,
+                "solver_call_timeout_seconds": 61,
+            }
+
+        self.assert_invalid(timeout, "cannot exceed")
+
+        def verifier_tokens(payload):
+            payload["legal_mcq"] = {
+                "verifier_visible_output_tokens": 512,
+                "verifier_length_retry_tokens": 384,
+            }
+
+        self.assert_invalid(verifier_tokens, "cannot be smaller")
+
+    def test_solver_fallback_inherits_generation_key_and_requires_call_budget(self) -> None:
+        payload = valid_payload()
+        payload["lgagent_plus"]["enabled"] = False  # type: ignore[index]
+        payload["legal_mcq"] = {
+            "enabled": True,
+            "max_model_calls": 6,
+            "solver_fallback_model": {
+                "model_name": "fallback",
+                "max_tokens": 4096,
+            },
+        }
+        config = self.load(payload)
+        assert config.legal_mcq.solver_fallback_model is not None
+        self.assertEqual(
+            config.legal_mcq.solver_fallback_model.api_key,
+            "generation-yaml-key",
+        )
+
+        payload["legal_mcq"]["max_model_calls"] = 5  # type: ignore[index]
+        with self.assertRaisesRegex(ConfigurationError, "requires at least 6"):
+            self.load(payload)
+
+    def test_rejects_unknown_reasoning_effort(self) -> None:
+        def mutate(payload):
+            payload["lgagent_plus"]["enabled"] = False
+            payload["legal_mcq"] = {
+                "enabled": True,
+                "solver_model": {
+                    "model_name": "solver",
+                    "reasoning_effort": "none",
+                },
+            }
+
+        self.assert_invalid(mutate, "reasoning_effort")
+
     def test_rejects_negative_verifier_weights_and_non_boolean_switches(self) -> None:
         self.assert_invalid(
             lambda p: p["lgagent_plus"]["cape_v"]["verifier"][  # type: ignore[index]
@@ -258,6 +472,19 @@ class StrictValidationTest(ConfigFileMixin, unittest.TestCase):
 
 
 class FeatureRoutingTest(ConfigFileMixin, unittest.TestCase):
+    def test_legal_mcq_route_is_not_reported_as_corrected_baseline(self) -> None:
+        payload = valid_payload()
+        payload["lgagent_plus"]["enabled"] = False  # type: ignore[index]
+        payload["legal_mcq"] = {"enabled": True}
+
+        route = resolve_pipeline_route(self.load(payload))
+
+        self.assertEqual(route.name, "legal-mcq-three-role")
+        self.assertTrue(route.legal_mcq_enabled)
+        self.assertFalse(route.corrected_baseline)
+        self.assertFalse(route.oath_rag_enabled)
+        self.assertFalse(route.cape_v_enabled)
+
     def test_master_switch_forces_corrected_baseline_in_legacy_batch(self) -> None:
         payload = valid_payload()
         payload["lgagent_plus"]["enabled"] = False  # type: ignore[index]

@@ -1,11 +1,14 @@
 {
   "format_version": 1,
   "datasets": {
-    "data/Ability_merged.jsonl": {
-      "sha256": "11ee25e64bc39cfd611694914f6354415ab0ea6e042336c3b61130f87f090302",
-      "bytes": 10270786,
-      "samples": 8385,
+    "data/LexGenius.jsonl": {
+      "sha256": "9033614d7115e1f3054c99dbcbe7295e06f35b5a3256fca3f9952741eea67d1e",
+      "bytes": 794578,
+      "samples": 560,
       "schema": {
+        "domain": [
+          "string"
+        ],
         "golden_answers": [
           "array"
         ],

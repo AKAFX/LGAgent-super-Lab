@@ -43,7 +43,7 @@ class Task14MatrixTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(tuple(item.key for item in first), REQUIRED_EXPERIMENT_KEYS)
         self.assertEqual(task14_matrix_payload(first), task14_matrix_payload(second))
-        self.assertEqual(len(first), 12)
+        self.assertEqual(len(first), 13)
 
     def test_main_configs_and_single_factor_ablations(self) -> None:
         by_key = {item.key: item for item in matrix()}
@@ -56,6 +56,9 @@ class Task14MatrixTest(unittest.TestCase):
             ),
             (False, False, False),
         )
+        self.assertTrue(by_key["web-search"].web_search_enabled)
+        self.assertFalse(by_key["web-search"].oath_rag_enabled)
+        self.assertFalse(by_key["web-search"].cape_v_enabled)
         self.assertEqual(
             (
                 by_key["oath-only"].oath_rag_enabled,
@@ -125,11 +128,11 @@ class Task14MatrixTest(unittest.TestCase):
             paths = export_task14_matrix(experiments, directory)
             self.assertEqual(set(paths), {"json", "csv", "markdown"})
             payload = json.loads(paths["json"].read_text(encoding="utf-8"))
-            self.assertEqual(payload["experiment_count"], 12)
+            self.assertEqual(payload["experiment_count"], 13)
             self.assertTrue(payload["offline_only"])
             with paths["csv"].open(encoding="utf-8", newline="") as stream:
                 rows = list(csv.DictReader(stream))
-            self.assertEqual(len(rows), 12)
+            self.assertEqual(len(rows), 13)
             markdown = paths["markdown"].read_text(encoding="utf-8")
             self.assertIn("Self-Consistency (equal-token)", markdown)
             for path in paths.values():
@@ -160,7 +163,7 @@ class Task14MatrixTest(unittest.TestCase):
             ):
                 cli.main()
 
-            self.assertIn("12 个配置", stdout.getvalue())
+            self.assertIn("13 个配置", stdout.getvalue())
             self.assertTrue(
                 (Path(directory) / "task14_ablation_matrix.json").exists()
             )

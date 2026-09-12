@@ -1,0 +1,12 @@
+name: legal-evaluation
+display_name: Legal Evaluation
+version: "1.0.0"
+description: Evaluation-only exact-match scoring with a private oracle.
+reference: |
+  Keep benchmark labels in the evaluator process. Invoke the production agent
+  with LegalQuestionRequest only, wait for completion, and read the oracle
+  afterward. Never place labels or annotation notes in prompts, queries, or
+  traces.
+extra_tools:
+  - evaluate_legal_answer
+hidden_from_catalog: true

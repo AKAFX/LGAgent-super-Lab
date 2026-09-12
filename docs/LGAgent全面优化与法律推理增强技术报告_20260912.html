@@ -1,0 +1,2009 @@
+<html><head><meta charset="utf-8"><title>LGAgent 全面优化与法律推理增强技术报告</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;max-width:980px;margin:40px auto;padding:0 36px;color:#202124;line-height:1.7}h1{font-size:30px;border-bottom:2px solid #333;padding-bottom:10px}h2{font-size:23px;margin-top:34px;border-bottom:1px solid #bbb;padding-bottom:6px}h3{font-size:18px;margin-top:26px}table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13px}th,td{border:1px solid #aaa;padding:7px 9px;vertical-align:top}th{background:#f2f3f5}code{font-family:Menlo,Consolas,monospace;background:#f3f4f6;padding:1px 4px}pre{background:#f6f7f8;border:1px solid #ddd;padding:12px;overflow-wrap:anywhere;white-space:pre-wrap}blockquote{border-left:4px solid #777;margin-left:0;padding-left:14px;color:#555}</style></head><body><h1>LGAgent 全面优化与法律推理增强技术报告</h1>
+<blockquote>
+<p>文档日期：2026-09-12<br />
+当前 LegalMCQ Prompt：<code>legal-mcq-three-role-v5</code><br />
+当前冻结 ID：<code>1931b3df9f45caf8f1c3ddc8</code><br />
+当前离线回归：<code>321 passed</code><br />
+项目定位：训练免费、可审计、可回滚的法律选择题多智能体推理系统</p>
+</blockquote>
+<h2>1. 文档目的</h2>
+<p>本文对 LGAgent 项目迄今完成的优化进行统一整理，回答五个问题：</p>
+<ol>
+<li>原始 LGAgent 已经具备什么能力；</li>
+<li>每轮修改解决了哪个流程问题；</li>
+<li>代码、配置、数据和评测体系分别发生了什么变化；</li>
+<li>为什么这些变化有可能改善法律回答，而不仅是增加 Agent 数量；</li>
+<li>哪些能力已经被工程或真实供应商验证，哪些仍不能宣称提高准确率。</li>
+</ol>
+<p>本文中的“更优”分为三种不同含义，不能混用：</p>
+<ul>
+<li><strong>工程更优</strong>：更少崩溃、更少截断、更可恢复、更可观测；</li>
+<li><strong>法律过程更优</strong>：更准确地识别题意、时间、选项、证据和审查责任；</li>
+<li><strong>统计效果更优</strong>：冻结方案后，在独立测试集上取得显著准确率提升。</li>
+</ul>
+<p>前两类已有较强证据，第三类仍需正式多种子对照实验。</p>
+<h2>2. 项目演进总览</h2>
+<p>LGAgent 的演进不是简单叠加 Prompt，而是逐步把一个开放式多 Agent 对话系统
+改造成具有显式状态、权限边界、资源预算和审计证据的法律推理系统。</p>
+<pre><code class="language-mermaid">flowchart LR
+    Q[法律选择题] --&gt; R{确定性路由}
+    R --&gt;|默认| B[Corrected LGAgent Baseline]
+    R --&gt;|实验开关| P[LGAgent++]
+    R --&gt;|LegalMCQ 开关| L[LegalMCQ v5]
+
+    B --&gt; BA[Lawyer A 结构化]
+    BA --&gt; BJ[Judge 控制]
+    BJ --&gt; B0[Lawyer B 盲答]
+    B0 --&gt; B1[逐项核验与有限澄清]
+
+    P --&gt; O[OATH-RAG]
+    P --&gt; C[CAPE-V]
+    P --&gt; W[BOLT-Web]
+    P --&gt; X[C-LEX]
+    P --&gt; I[CLIR 离线策略]
+
+    L --&gt; A[Request / Oracle 隔离]
+    A --&gt; PC[题意、极性、时点解析]
+    PC --&gt; C3[Controller v3]
+    C3 --&gt; CB[代码绑定原始选项 Claim]
+    CB --&gt; S[Strong Solver v3]
+    S --&gt; DV[确定性 Validator]
+    DV --&gt; V[Verifier v2]
+    V --&gt; REV[最多一次 Solver 修订]
+    REV --&gt; F[确定性 Finalizer]
+</code></pre>
+<p>当前配置将三条路线互相隔离：</p>
+<ul>
+<li><code>legal_mcq.enabled: false</code>：不启用新三角色链路；</li>
+<li><code>lgagent_plus.enabled: false</code>：不启用 OATH-RAG、CAPE-V、Web、C-LEX；</li>
+<li>两个总开关不能同时开启；</li>
+<li>所有实验创新默认关闭，保留为研究原型；</li>
+<li>当前推荐把“稳定工程基线”和“待验证创新”分开报告。</li>
+</ul>
+<h2>3. 原始 LGAgent 的方法基础</h2>
+<p>原始 LGAgent 采用 Lawyer A、Judge、Lawyer B 三角色：</p>
+<ol>
+<li>Lawyer A 对题目进行结构化分解；</li>
+<li>Judge 决定证据需求、反例方向和是否检索；</li>
+<li>Lawyer B 先在看不到上游观点时给出盲答 B0；</li>
+<li>Lawyer B 再看到结构和证据，逐项输出 SUPPORT、REFUTE 或 NEI；</li>
+<li>当 NEI 比例不低于 0.5 或 B0 置信度低于 0.6 时，最多增加两轮澄清。</li>
+</ol>
+<p>该设计已经包含几个重要思想：</p>
+<ul>
+<li>先结构化、后裁决；</li>
+<li>将先验答案与证据后答案分离；</li>
+<li>对所有选项逐项核验，而不是只解释被选项；</li>
+<li>用显式规则限制对话轮数；</li>
+<li>将检索作为可选能力，而非默认给模型灌入网页内容。</li>
+</ul>
+<p>README 中记录的论文结果显示，多种模型在 JEC-QA、LexGenius、CAIL2022
+上使用 LGAgent 后高于 Direct 和 CoT。例如 Qwen3-4B 在 LexGenius 上的
+记录为 <code>55.62 / 56.33 / 59.25</code>（Direct / CoT / LGAgent）。
+论文中的抽样成本分析还记录：LGAgent 配置约为每 1000 题
+<code>0.29-0.68</code> 美元，对比所评估前沿模型直接回答的 <code>3.16-3.37</code> 美元。</p>
+<p>这些是论文已有结果。后续本地工程试验使用了不同模型、样本、供应商和配置，
+不能与论文表格直接混算。</p>
+<h2>4. 全部优化点总表</h2>
+<table>
+<thead>
+<tr>
+<th>编号</th>
+<th>优化点</th>
+<th>修改流程</th>
+<th>核心收益</th>
+<th>当前状态</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>O01</td>
+<td>严格 JSON 协议</td>
+<td>全角色输出</td>
+<td>将自由文本变成可验证状态</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O02</td>
+<td>Answer-neutral 角色边界</td>
+<td>Lawyer A / Controller</td>
+<td>降低上游答案锚定</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O03</td>
+<td>B0 盲答分离</td>
+<td>Lawyer B</td>
+<td>保留独立先验判断</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O04</td>
+<td>全选项核验</td>
+<td>Lawyer B / Solver</td>
+<td>减少只为候选项找理由</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O05</td>
+<td>有限澄清和修订</td>
+<td>对话控制</td>
+<td>防止无限循环和成本失控</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O06</td>
+<td>高风险定向重检索</td>
+<td>LGAgent++ 高风险路径</td>
+<td>针对验证缺口补证据</td>
+<td>已实现、默认关闭</td>
+</tr>
+<tr>
+<td>O07</td>
+<td>反事实真实接入 Runner</td>
+<td>CAPE-V</td>
+<td>测试选项顺序与表面扰动稳定性</td>
+<td>已实现、默认关闭</td>
+</tr>
+<tr>
+<td>O08</td>
+<td>共享 BM25 与语料对象</td>
+<td>实验 Runner</td>
+<td>避免每题重复建索引</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O09</td>
+<td>全局调用/token/时间预算</td>
+<td>所有模型调用</td>
+<td>统一控制开销并阻断超限调用</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O10</td>
+<td>可复现 seed 传递</td>
+<td>所有模型调用</td>
+<td>区分调用身份并记录随机性边界</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O11</td>
+<td>统一领域标签</td>
+<td>数据与评测</td>
+<td>支持七维分析和分组校准</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O12</td>
+<td>OATH 三车道检索</td>
+<td>RAG</td>
+<td>同时找支持、反驳和例外</td>
+<td>已实现、默认关闭</td>
+</tr>
+<tr>
+<td>O13</td>
+<td>法域/权威/时效硬过滤</td>
+<td>RAG</td>
+<td>减少错误法域和失效法条</td>
+<td>已实现、默认关闭</td>
+</tr>
+<tr>
+<td>O14</td>
+<td>Evidence Auditor</td>
+<td>RAG 后处理</td>
+<td>只允许原文片段成为证据</td>
+<td>已实现、默认关闭</td>
+</tr>
+<tr>
+<td>O15</td>
+<td>CAPE-V 多候选与排列探针</td>
+<td>推理与鲁棒性</td>
+<td>检测答案位置偏差和不稳定性</td>
+<td>已实现、默认关闭</td>
+</tr>
+<tr>
+<td>O16</td>
+<td>五维 Verifier</td>
+<td>候选审计</td>
+<td>分离规则、事实、例外、证据、蕴含</td>
+<td>已实现、默认关闭</td>
+</tr>
+<tr>
+<td>O17</td>
+<td>风险感知计算路由</td>
+<td>自适应编排</td>
+<td>只给高风险题增加计算</td>
+<td>已实现、默认关闭</td>
+</tr>
+<tr>
+<td>O18</td>
+<td>确定性候选聚合</td>
+<td>最终选择</td>
+<td>避免最后再交给一个模型拍板</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O19</td>
+<td>LexGenius 560 题平衡集</td>
+<td>数据</td>
+<td>七维各 80 题、可复现构建</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O20</td>
+<td>冻结划分与哈希</td>
+<td>实验</td>
+<td>防止测试集调参和数据漂移</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O21</td>
+<td>失败样本保留分母</td>
+<td>评测</td>
+<td>防止只报告幸存样本准确率</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O22</td>
+<td>原子 checkpoint 与断点续跑</td>
+<td>实验执行</td>
+<td>防止中断导致结果丢失或重复</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O23</td>
+<td>API key 池与受控并发</td>
+<td>实验执行</td>
+<td>提升吞吐并避免同 key 竞争</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O24</td>
+<td>完整评测指标</td>
+<td>评估</td>
+<td>准确率之外测证据、鲁棒性、校准、成本</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O25</td>
+<td>BOLT-Web 预算搜索</td>
+<td>联网检索</td>
+<td>仅在新鲜性或低置信时搜索</td>
+<td>已实现、默认关闭</td>
+</tr>
+<tr>
+<td>O26</td>
+<td>网页证据质量门</td>
+<td>联网检索</td>
+<td>拒绝低相关、冲突和低质量来源</td>
+<td>已实现、默认关闭</td>
+</tr>
+<tr>
+<td>O27</td>
+<td>C-LEX 保形选项消除</td>
+<td>不确定性控制</td>
+<td>不训练模型的校准式候选收缩</td>
+<td>已实现、默认关闭</td>
+</tr>
+<tr>
+<td>O28</td>
+<td>CLIR 因果干预路由</td>
+<td>创新研究</td>
+<td>只选择保守下界为正的干预</td>
+<td>离线原型</td>
+</tr>
+<tr>
+<td>O29</td>
+<td>LegalMCQ Request/Oracle 隔离</td>
+<td>评测边界</td>
+<td>标签永不进入 Agent Prompt</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O30</td>
+<td>题干极性修复</td>
+<td>输入解析</td>
+<td>防止案情否定词误导“选正确/错误”</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O31</td>
+<td>法律时点优先级修复</td>
+<td>输入解析</td>
+<td>优先题目假设日期和当代时点</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O32</td>
+<td>SDK 响应适配</td>
+<td>模型边界</td>
+<td>正确处理 null、拒答、tool calls、分段正文</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O33</td>
+<td>逐调用日志</td>
+<td>可观测性</td>
+<td>还原每次调用的真实结束原因</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O34</td>
+<td>题级 hard deadline</td>
+<td>运行时</td>
+<td>调用中超时也能停止等待</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O35</td>
+<td>下游预算预留</td>
+<td>编排</td>
+<td>修订前保留最终核验能力</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O36</td>
+<td>结构化输出能力协商</td>
+<td>Provider 适配</td>
+<td>Schema 不支持时显式且有界回退</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O37</td>
+<td>reasoning 可观测与软控制</td>
+<td>Token 管理</td>
+<td>区分隐藏推理和可见正文</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O38</td>
+<td>Solver v3 紧凑协议</td>
+<td>主答题输出</td>
+<td>删除重复字段，减少截断</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O39</td>
+<td>Verifier v2 紧凑协议</td>
+<td>核验输出</td>
+<td>384-token 目标和稳定错误码</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O40</td>
+<td>异构 Solver fallback</td>
+<td>超时恢复</td>
+<td>主模型超时后只切换一次备用模型</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O41</td>
+<td>Runner 级熔断</td>
+<td>批量执行</td>
+<td>连续超时后绕过不健康主模型</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O42</td>
+<td>确定性错误直达修订</td>
+<td>核验编排</td>
+<td>不浪费一次 LLM Verifier</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O43</td>
+<td>Controller v3 Claim 绑定</td>
+<td>选项语义边界</td>
+<td>根除跨选项 Claim 误挂</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O44</td>
+<td>一键回滚和互斥路由</td>
+<td>部署</td>
+<td>新链路异常时恢复旧流程</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O45</td>
+<td>版本化 Skill 与工具白名单</td>
+<td>Agent 能力边界</td>
+<td>防止评测工具和任意工具进入生产 Prompt</td>
+<td>已实现</td>
+</tr>
+<tr>
+<td>O46</td>
+<td>前沿模型角色升级</td>
+<td>LegalMCQ 模型策略</td>
+<td>GPT 主答、Qwen Max 备用、稳定小模型守边界</td>
+<td>已实现并 smoke</td>
+</tr>
+</tbody>
+</table>
+<h2>5. 第一阶段：原 LGAgent 工程链路硬化</h2>
+<h3>5.1 严格结构化协议</h3>
+<p><strong>修改位置</strong></p>
+<ul>
+<li><code>src/lgagent/protocol.py</code></li>
+<li><code>src/lgagent/domain.py</code></li>
+</ul>
+<p><strong>原问题</strong></p>
+<p>自由文本输出可能包含 Markdown、解释性前后缀、缺失字段、非法选项或答案泄漏。
+后续角色若继续消费这类输出，会把格式错误放大成推理错误。</p>
+<p><strong>修改</strong></p>
+<ul>
+<li>所有角色输出先解析为 typed dataclass；</li>
+<li>顶层必须是 JSON object；</li>
+<li>支持完整 JSON Markdown fence，但拒绝 fence 外文字；</li>
+<li>选项必须属于 A-D；</li>
+<li>Lawyer A 出现答案字段时直接拒绝；</li>
+<li>非法结构有限重试，最终显式失败，不从自然语言猜答案。</li>
+</ul>
+<p><strong>法律回答价值</strong></p>
+<p>法律推理依赖主体、行为、规则和结论的稳定对应。结构化协议让“模型是否完成
+全部分析步骤”成为可检查事实，减少看似流畅但缺项的回答。</p>
+<h3>5.2 盲答与核验分离</h3>
+<p><strong>修改位置</strong></p>
+<ul>
+<li><code>src/lgagent/domain.py</code></li>
+<li><code>src/lgagent/protocol.py</code></li>
+</ul>
+<p>Lawyer B 的 B0 只看原题，先给出答案和置信度；B1 再看到结构和证据逐项核验。
+这降低了 Lawyer A 或 Judge 先入观点对最终模型的锚定，并为“前后是否改变”
+提供了可观测信号。</p>
+<h3>5.3 有限重试与有限对话</h3>
+<p>结构错误最多重试 <code>max_attempts</code>，澄清最多执行 <code>max_dialogue_rounds</code>。
+失败不会退回无限自然语言对话。法律回答系统中，有限交互比“让模型一直讨论”
+更重要，因为无限讨论既不能保证收敛，也无法控制成本和复现结果。</p>
+<h2>6. 第二阶段：LGAgent++ 证据与风险推理</h2>
+<h3>6.1 OATH-RAG：选项对齐的三车道检索</h3>
+<p><strong>代码</strong></p>
+<ul>
+<li><code>src/lgagent/oath_rag.py</code></li>
+<li><code>src/lgagent/corpus.py</code></li>
+<li><code>src/lgagent/corpus_builder.py</code></li>
+<li><code>src/lgagent/evidence_audit.py</code></li>
+</ul>
+<p>普通 RAG 常围绕整道题只检索“相关内容”，容易只找到支持当前猜测的材料。
+OATH-RAG 为每个选项分别构造：</p>
+<ul>
+<li><code>support</code>：支持该选项成立的规则和要件；</li>
+<li><code>refute</code>：使该选项不成立的缺失要件或相反规则；</li>
+<li><code>exception</code>：但书、除外和特殊规则。</li>
+</ul>
+<p>检索流程为：</p>
+<pre><code class="language-text">Option Claim
+  -&gt; support/refute/exception query
+  -&gt; 法域、权威、时效候选过滤
+  -&gt; BM25 lexical retrieval
+  -&gt; optional dense retrieval
+  -&gt; Reciprocal Rank Fusion
+  -&gt; 一跳法律关系扩展
+  -&gt; 去重与最小充分证据集
+  -&gt; Evidence Auditor
+</code></pre>
+<p>重要实现细节：</p>
+<ul>
+<li>CPU-first BM25，不要求 GPU；</li>
+<li>BM25 索引在实验级共享，不再每题重复构建；</li>
+<li>可注入 dense retriever，但默认不依赖；</li>
+<li>法条版本区间禁止重叠；</li>
+<li>只对固定关系类型做一跳图扩展；</li>
+<li>相同文本证据去重；</li>
+<li>对每条证据保留来源 URI、法名、条号、有效期和内容哈希。</li>
+</ul>
+<p><strong>法律回答价值</strong></p>
+<p>法律选项通常不是“有没有相关法条”，而是“要件是否满足、是否有例外、该版本
+是否在案件时点有效”。三车道检索直接对应这三个问题，比单向相似度检索更适合
+排除绝对化、遗漏但书和引用旧法等错误。</p>
+<h3>6.2 Evidence Auditor：证据不是检索到就可用</h3>
+<p>Evidence Auditor 将候选证据标记为：</p>
+<ul>
+<li><code>SUPPORT</code></li>
+<li><code>REFUTE</code></li>
+<li><code>EXCEPTION</code></li>
+<li><code>IRRELEVANT</code></li>
+<li><code>TEMPORALLY_INVALID</code></li>
+</ul>
+<p>并要求模型返回输入证据中的精确片段。未知 Evidence ID、非原文 span、
+失效版本和低权威来源会被代码拒绝。</p>
+<p>输出矩阵按选项计算：</p>
+<ul>
+<li>coverage；</li>
+<li>conflict；</li>
+<li>authority；</li>
+<li>temporal status。</li>
+</ul>
+<p>这使系统可以区分“检索到了很多文本”和“检索到了能在目标时点支持该命题的
+有效依据”。Open-book LegalMCQ 只接受审计后的全文证据，搜索摘要不能作为
+决定性依据。</p>
+<h3>6.3 CAPE-V：候选、排列和五维核验</h3>
+<p><strong>代码</strong></p>
+<ul>
+<li><code>src/lgagent/cape_v.py</code></li>
+<li><code>src/lgagent/verification.py</code></li>
+<li><code>src/lgagent/counterfactual.py</code></li>
+</ul>
+<p>CAPE-V 生成多个独立候选，并对选项位置做确定性置换。置换后答案按“选项文本
+身份”映射回原标签，而不是直接比较显示位置。</p>
+<p>每个候选使用紧凑 IRAC：</p>
+<ul>
+<li>Issue；</li>
+<li>Rule 及 Evidence ID；</li>
+<li>Application；</li>
+<li>Conclusion；</li>
+<li>四个选项的 SUPPORT/REFUTE/NEI。</li>
+</ul>
+<p>五类独立核验器分别检查：</p>
+<ol>
+<li>Rule；</li>
+<li>Fact；</li>
+<li>Exception；</li>
+<li>Evidence；</li>
+<li>Entailment。</li>
+</ol>
+<p>候选最终分数为：</p>
+<p>[
+S(c)=V(c)\times C(c)\times A(c)\times T(c)\times Q(c)\times P(c)
+]</p>
+<p>其中：</p>
+<ul>
+<li>(V)：投票强度；</li>
+<li>(C)：证据覆盖；</li>
+<li>(A)：来源权威；</li>
+<li>(T)：时效有效性；</li>
+<li>(Q)：Verifier 分数；</li>
+<li>(P)：选项置换一致性。</li>
+</ul>
+<p>分数相等时使用固定字段和候选 ID 稳定排序，不让输入顺序决定结果。</p>
+<p><strong>法律回答价值</strong></p>
+<p>多数投票会把“多个候选重复同一错误”当成可靠。乘法聚合要求候选同时满足
+证据、时效、核验和稳定性，任何关键维度接近零都会压低候选，适合高风险法律
+任务的保守决策。</p>
+<h3>6.4 反事实与鲁棒性</h3>
+<p>原先存在反事实代码但未真正进入 Runner。优化后：</p>
+<ul>
+<li>选项重排复用已有 permutation 结果；</li>
+<li>无害文本规范化检查答案是否应保持；</li>
+<li>未经验证的“应改变标签”变换不计入指标；</li>
+<li>结果写入 <code>counterfactual_observations</code> 和 sensitivity/specificity。</li>
+</ul>
+<p>该机制主要检测模型是否依赖选项位置、空格或标点，而不是依赖法律内容。</p>
+<h3>6.5 风险感知自适应计算</h3>
+<p>风险由六类信号组成：</p>
+<ul>
+<li>答案熵；</li>
+<li>选项置换不稳定；</li>
+<li>Verifier 分歧；</li>
+<li>证据冲突；</li>
+<li>证据缺失；</li>
+<li>Top-2 margin 过低。</li>
+</ul>
+<p>归一化加权风险决定三条路线：</p>
+<pre><code class="language-text">低风险   -&gt; FAST
+中风险   -&gt; VERIFY_MORE
+高风险   -&gt; RETRIEVE_AND_REASON
+</code></pre>
+<p>高风险路径不再简单重复原问题，而是根据失败的核验维度和缺失证据车道生成
+定向分析，再执行真正的重检索和推理。</p>
+<h3>6.6 全局预算与最佳已有答案回退</h3>
+<p><code>ExecutionBudget</code> 和 <code>BudgetGuard</code> 同时限制：</p>
+<ul>
+<li>模型调用数；</li>
+<li>总 token；</li>
+<li>自适应轮数；</li>
+<li>墙钟时间。</li>
+</ul>
+<p>开始高成本动作前先预留其最坏成本。如果预算不足，系统返回当前最佳已核验
+候选并标记预算耗尽，而不是开始一个无法完成的半流程。</p>
+<h2>7. 第三阶段：数据、评测和复现体系</h2>
+<h3>7.1 LexGenius 560 题平衡数据集</h3>
+<p><strong>代码与工件</strong></p>
+<ul>
+<li><code>tools/build_lexgenius_dataset.py</code></li>
+<li><code>data/LexGenius.jsonl</code></li>
+<li><code>data/LexGenius.manifest.json</code></li>
+</ul>
+<p>构建规则：</p>
+<ul>
+<li>七个法律维度各抽取 80 题；</li>
+<li>总计 560 题；</li>
+<li>seed 固定为 42；</li>
+<li>每个维度使用派生 seed；</li>
+<li>round-robin 排列，避免文件前缀被单一维度占据；</li>
+<li>排除无法解析的四选项题、重复题和答案泄漏题；</li>
+<li>本次共排除 11 条；</li>
+<li>输出 SHA-256 为
+<code>9033614d7115e1f3054c99dbcbe7295e06f35b5a3256fca3f9952741eea67d1e</code>。</li>
+</ul>
+<p>七个维度为：</p>
+<ol>
+<li>Legal Understanding；</li>
+<li>Legal Reasoning；</li>
+<li>Legal Application；</li>
+<li>Legal Ethics；</li>
+<li>Legal Language；</li>
+<li>Law and Society；</li>
+<li>Judicial Practice。</li>
+</ol>
+<h3>7.2 冻结划分</h3>
+<p>数据不复制，使用以下稳定规则计算 train/dev/test：</p>
+<pre><code class="language-text">sha256(split_seed : dataset_sha256 : sample_id) mod 10000
+</code></pre>
+<p>比例固定为 8000/1000/1000，split seed 为 <code>20260826</code>。当前冻结中：</p>
+<table>
+<thead>
+<tr>
+<th>数据集</th>
+<th style="text-align:right">总量</th>
+<th style="text-align:right">Train</th>
+<th style="text-align:right">Dev</th>
+<th style="text-align:right">Test</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LexGenius</td>
+<td style="text-align:right">560</td>
+<td style="text-align:right">442</td>
+<td style="text-align:right">53</td>
+<td style="text-align:right">65</td>
+</tr>
+<tr>
+<td>CAIL2022</td>
+<td style="text-align:right">300</td>
+<td style="text-align:right">230</td>
+<td style="text-align:right">31</td>
+<td style="text-align:right">39</td>
+</tr>
+<tr>
+<td>LawBench merged</td>
+<td style="text-align:right">9989</td>
+<td style="text-align:right">7990</td>
+<td style="text-align:right">1007</td>
+<td style="text-align:right">992</td>
+</tr>
+</tbody>
+</table>
+<p>正式实验种子固定为 <code>42/43/44</code>。冻结文件同时保存数据、配置、Prompt 源码哈希，
+任何漂移都会使运行前校验失败。</p>
+<h3>7.3 失败样本不从分母删除</h3>
+<p>评测 Runner 将 API 错误、Schema 错误、超时和预算失败都写成结果记录。
+预测为空的失败样本按错误计入总体分母。该设计避免：</p>
+<ul>
+<li>只报告成功返回样本；</li>
+<li>中断后替换困难题；</li>
+<li>通过反复重跑挑选最好结果；</li>
+<li>把服务稳定性问题隐藏在“条件准确率”中。</li>
+</ul>
+<h3>7.4 断点续跑与并发</h3>
+<ul>
+<li>每个 sample 使用稳定 ID；</li>
+<li>checkpoint 原子写入；</li>
+<li>已完成 ID 自动跳过；</li>
+<li>experiment ID 不匹配时拒绝混写；</li>
+<li>API key 池去重并独占租赁；</li>
+<li>显式 key 池时，并发不能大于 key 数；</li>
+<li>共享语料和 BM25 资源只构建一次。</li>
+</ul>
+<h3>7.5 扩展评测指标</h3>
+<p>除 Accuracy、EM、F1 外，项目还实现：</p>
+<ul>
+<li>Recall@K、MRR、NDCG；</li>
+<li>citation precision/recall/F1；</li>
+<li>permutation consistency；</li>
+<li>counterfactual sensitivity/specificity；</li>
+<li>ECE、Brier score；</li>
+<li>risk-coverage curve 和 AURC；</li>
+<li>calls、prompt/completion/total tokens、延迟和费用字段；</li>
+<li>paired bootstrap；</li>
+<li>精确 McNemar 检验；</li>
+<li>七维 domain accuracy；</li>
+<li>Web 的纠正数和伤害数；</li>
+<li>C-LEX 覆盖率、集合大小和正确项消除率。</li>
+</ul>
+<p>这使“回答得更准”“证据更好”“更稳”“更省”可以分别度量。</p>
+<h2>8. 第四阶段：训练免费创新原型</h2>
+<h3>8.1 BOLT-Web：预算约束网页搜索</h3>
+<p><strong>代码</strong></p>
+<ul>
+<li><code>src/lgagent/web_search.py</code></li>
+</ul>
+<p>触发条件不是每题都搜索，而是：</p>
+<ul>
+<li>题目出现“最新、现行、截至、当前”等新鲜性信号；</li>
+<li>B0 置信度低于阈值；</li>
+<li>Judge 要求检索且 B0 处于中低置信区间。</li>
+</ul>
+<p>当前实现边界：</p>
+<ul>
+<li>配置支持每题 1-2 次搜索，当前示例为 2；</li>
+<li>最多 3 个最终来源；</li>
+<li>上下文约 1800 tokens；</li>
+<li>HTTPS URL；</li>
+<li>Tavily 不请求生成式答案和 raw content；</li>
+<li>优先官方、学术和法律专业来源；</li>
+<li>低相关、单条低质量、冲突答案页不注入。</li>
+</ul>
+<p>查询先使用短法律查询，必要时再回退到精确题干查询。系统还检测页面是否在题干
+匹配位置之后明确给出答案，避免把页面前部无关的 A/B/C/D 误当答案。</p>
+<p>论文正式实验约束应进一步收紧为每题最多 1 次搜索；因此运行正式 Web 对照前
+必须将 <code>max_searches</code> 冻结为 1。当前允许 2 次是工程能力上限，不应被写成
+最终实验预算。</p>
+<p><strong>真实结果</strong></p>
+<p>Qwen3-8B、LexGenius 100、seed 42 的同批结果：</p>
+<table>
+<thead>
+<tr>
+<th>路线</th>
+<th style="text-align:right">准确率</th>
+<th style="text-align:right">失败</th>
+<th style="text-align:right">已观察 tokens</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Original</td>
+<td style="text-align:right">50%</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">988,761</td>
+</tr>
+<tr>
+<td>Web Search</td>
+<td style="text-align:right">49%</td>
+<td style="text-align:right">1</td>
+<td style="text-align:right">1,020,612</td>
+</tr>
+</tbody>
+</table>
+<p>网页分支只纠正 1 题，却伤害 5 题。因此 BOLT-Web 已完成工程实现，但不能
+宣称提升准确率，当前默认关闭。</p>
+<h3>8.2 C-LEX：Conformal Legal Option Elimination</h3>
+<p><strong>代码</strong></p>
+<ul>
+<li><code>src/lgagent/clex.py</code></li>
+<li><code>tools/calibrate_clex.py</code></li>
+<li><code>tools/evaluate_clex.py</code></li>
+</ul>
+<p>C-LEX 将以下既有信号组合成每个选项的 conformity：</p>
+<ul>
+<li>候选答案频率；</li>
+<li>候选逐项支持度；</li>
+<li>Verifier 支持度；</li>
+<li>证据支持度；</li>
+<li>permutation 支持度。</li>
+</ul>
+<p>在 dev 集计算有限样本 conformal quantile，可按领域使用 Mondrian 阈值。
+校准集不足、artifact 不匹配或结果为空时 fail closed，不进行选项消除。</p>
+<p>已有 30 条校准记录得到全局阈值 0.6875。小规模 replay 能证明实现和覆盖率
+统计可运行，但样本不足、跨数据集差异明显，尚不能证明稳定准确率收益，
+因此默认关闭。</p>
+<h3>8.3 CLIR：Causal Law Intervene Routing</h3>
+<p><strong>代码</strong></p>
+<ul>
+<li><code>src/lgagent/clir.py</code></li>
+<li><code>tools/build_clir_dataset.py</code></li>
+<li><code>tools/calibrate_clir.py</code></li>
+<li><code>tools/evaluate_clir.py</code></li>
+</ul>
+<p>CLIR 的问题不是“哪个模块平均看起来强”，而是：</p>
+<blockquote>
+<p>对当前题目，执行某个干预动作相对 Original 是否有可信的增量收益？</p>
+</blockquote>
+<p>对动作 (a)，定义配对结果：</p>
+<p>[
+D_i(a)=Correct_i(a)-Correct_i(Original)
+]</p>
+<p>然后计算平均 uplift 和 Bonferroni-Hoeffding 单侧下界。动作效用为：</p>
+<p>[
+Utility(a)=LCB(Uplift_a)</p>
+<ul>
+<li>\lambda \frac{\max(0,\Delta Tokens_a)}{TokenScale}
+]</li>
+</ul>
+<p>只有效用严格为正且超过阈值时才允许干预，否则保持 Original。</p>
+<p>现有 100 题原型只得到 13 条 dev 配对：</p>
+<ul>
+<li>Web 平均 uplift：<code>+0.0769</code>；</li>
+<li>90% Hoeffding 下界：<code>-0.5183</code>；</li>
+<li>测试 15 题全部选择 Original；</li>
+<li>routed accuracy 与 baseline 都是 0.40；</li>
+<li>新增 token 为 0。</li>
+</ul>
+<p>这证明 CLIR 的“无收益则不干预”安全逻辑有效，但尚未证明个体化因果路由有效。
+项目要求至少收集 200 道独立 dev 题的多动作配对结果。现有一次 200 题收集
+中 Web 失败 104 题、CAPE-only 失败 195 题，不能直接用于有效性结论。</p>
+<h3>8.4 为什么保留这些负结果</h3>
+<p>Web、C-LEX、CLIR、OATH/CAPE 联合路线均保留代码与工件，但默认关闭。这样做
+比删除失败实验更有研究价值：</p>
+<ul>
+<li>可以证明方案经过真实比较，而非只展示成功案例；</li>
+<li>为后续改进保留可复现基线；</li>
+<li>防止把工程功能完成误写成准确率贡献；</li>
+<li>清楚区分“方法假设”“实现正确”“效果显著”三个层次。</li>
+</ul>
+<h2>9. 第五阶段：LegalMCQ 三角色链路</h2>
+<h3>9.1 设计目标</h3>
+<p>LegalMCQ 将角色权力重新分配：</p>
+<pre><code class="language-text">Controller：只整理问题
+Strong Solver：唯一主答题者
+Verifier：只审查
+Code：控制数据、预算、证据、修订和最终状态
+</code></pre>
+<p>它不是让三个模型共同投票，而是让一个强模型负责法律判断，两个经济模型负责
+结构和规范，同时由确定性代码限制任何角色越权。</p>
+<h3>9.2 Request / Oracle 物理隔离</h3>
+<p><strong>代码</strong></p>
+<ul>
+<li><code>src/lgagent/legal_mcq/adapter.py</code></li>
+<li><code>src/lgagent/legal_mcq/evaluation.py</code></li>
+</ul>
+<p>BenchmarkRecord 被拆成：</p>
+<pre><code class="language-text">EvaluationCase
+  ├── LegalQuestionRequest -&gt; Agent
+  └── EvaluationOracle     -&gt; Evaluator
+</code></pre>
+<p><code>LeakGuard</code> 递归检查 dataclass、Mapping 和序列，禁止以下字段进入 Agent：</p>
+<ul>
+<li><code>golden_answers</code></li>
+<li><code>correct_option</code></li>
+<li><code>correct_answer</code></li>
+<li><code>reference_answer</code></li>
+<li><code>annotation_note</code></li>
+<li><code>oracle</code></li>
+</ul>
+<p>Evaluator 只在 Agent 完成后读取 Oracle。该边界比“在 Prompt 中提醒不要看答案”
+更强，因为标签对象根本不会传入生产 Agent。</p>
+<h3>9.3 确定性题目解析</h3>
+<p><strong>代码</strong></p>
+<ul>
+<li><code>src/lgagent/legal_mcq/parser.py</code></li>
+</ul>
+<p>解析器在任何模型调用前完成：</p>
+<ul>
+<li>半角/全角选项标签归一化；</li>
+<li>连续选项和重复选项检查；</li>
+<li>单选/多选识别；</li>
+<li>最终问题指令提取；</li>
+<li>正向题/反向题识别；</li>
+<li>法域、显式法律名和日期元数据生成。</li>
+</ul>
+<h4>极性修复</h4>
+<p>早期实现扫描整段案情中的“错误、不符合”等词，导致 ID 5、12、25 被背景
+否定词污染；ID 85 的“不正确的是”又被截成“正确的是”。</p>
+<p>修复后：</p>
+<ul>
+<li>先定位最后问题句；</li>
+<li>保留完整否定短语；</li>
+<li>只在最终 directive 中判断极性；</li>
+<li>反向题由 Validator 强制选择 <code>contradicted</code>；</li>
+<li>正向题强制选择 <code>supported</code>。</li>
+</ul>
+<h4>时点修复</h4>
+<p>日期优先级改为：</p>
+<pre><code class="language-text">题目假设日期
+  &gt; 最终问题显式日期
+  &gt; Request metadata
+  &gt; 当代/现行指示对应运行日期
+  &gt; 明确案发/合同/裁判日期
+  &gt; 其他背景日期
+  &gt; 运行日期
+</code></pre>
+<p>因此 ID 20 的“若发生在 2023 年”不再被 1997 年背景覆盖；历史案件转向
+“当代类似案件”的题目也不再机械沿用旧年份。</p>
+<p><strong>法律回答价值</strong></p>
+<p>法律结论高度依赖问题极性和适用时点。这里修复的不是表达风格，而是会直接
+改变正确选项和适用法版本的上游语义。</p>
+<h3>9.4 Controller v1 → v2 → v3</h3>
+<h4>v1 问题</h4>
+<p>旧 Controller 输出字段多、ID 由模型自由生成，并可能在自然语言中暗示答案。
+Claim 覆盖只看数量，无法证明命题一一对应。</p>
+<h4>v2 优化</h4>
+<ul>
+<li>使用严格 JSON Schema；</li>
+<li>输出 facts、issues、option_claims、checks；</li>
+<li>F1、I1、A1 等 ID 改由代码生成；</li>
+<li>递归拒绝答案字段；</li>
+<li>Schema 根据题目选项动态限制标签。</li>
+</ul>
+<p>v2 解决了编号漂移，但仍让模型决定 Claim 文本属于哪个选项。</p>
+<h4>v3 最终优化</h4>
+<p>真实 fallback 验证中，题 259 的 Controller 将 C 的第二个子命题挂到了 D，
+导致正确答案虽然是 C，仍因 Claim ID 覆盖失败而成为 <code>partial</code>。</p>
+<p>Controller v3 因此彻底取消模型生成 <code>option_claims</code>：</p>
+<pre><code class="language-json">{
+  &quot;protocol_version&quot;: &quot;controller-v3&quot;,
+  &quot;facts&quot;: [&quot;关键事实&quot;],
+  &quot;issues&quot;: [
+    {&quot;description&quot;: &quot;待核验争点&quot;, &quot;options&quot;: [&quot;A&quot;, &quot;B&quot;, &quot;C&quot;, &quot;D&quot;]}
+  ],
+  &quot;checks&quot;: [&quot;核验点&quot;]
+}
+</code></pre>
+<p>代码直接从可信原始选项绑定：</p>
+<pre><code class="language-json">{
+  &quot;A&quot;: [&quot;A1 &lt;完整A项原文&gt;&quot;],
+  &quot;B&quot;: [&quot;B1 &lt;完整B项原文&gt;&quot;],
+  &quot;C&quot;: [&quot;C1 &lt;完整C项原文&gt;&quot;],
+  &quot;D&quot;: [&quot;D1 &lt;完整D项原文&gt;&quot;]
+}
+</code></pre>
+<p>旧 v1/v2 仍能解析，但它们生成的 Claims 在进入 Solver 前被覆盖。这样 Claim
+文本、所属选项和 ID 具有同一可信来源。</p>
+<p><strong>这是当前链路非常关键的设计点</strong>：模型可以解释一个选项为什么成立或不成立，
+但不能改写“它正在判断哪个选项”。</p>
+<h3>9.5 Strong Solver v1 → v2 → v3</h3>
+<p>Solver 是唯一允许选择答案的模型。它接收：</p>
+<ul>
+<li>一份题目；</li>
+<li>极性、题型、法域和时点；</li>
+<li>Controller 的事实、争点和规范 Claims；</li>
+<li>可选的已审计证据；</li>
+<li>输出预算；</li>
+<li>生产 Skill 版本。</li>
+</ul>
+<p>Solver v2 引入结构化 Schema 和固定 Claim ID；v3 删除重复的 issues 和顶层
+rationale，输出：</p>
+<pre><code class="language-json">{
+  &quot;protocol_version&quot;: &quot;solver-v3&quot;,
+  &quot;selected_options&quot;: [&quot;C&quot;],
+  &quot;options&quot;: [
+    {
+      &quot;label&quot;: &quot;C&quot;,
+      &quot;claims&quot;: [
+        {
+          &quot;claim_id&quot;: &quot;C1&quot;,
+          &quot;verdict&quot;: &quot;contradicted&quot;,
+          &quot;reason&quot;: &quot;决定性适用理由&quot;,
+          &quot;evidence_ids&quot;: []
+        }
+      ],
+      &quot;verdict&quot;: &quot;contradicted&quot;
+    }
+  ],
+  &quot;confidence&quot;: 0.9
+}
+</code></pre>
+<p>上例只展示一个 option item；实际输出必须覆盖题目的全部选项。</p>
+<p>最终 rationale 由代码从已选项 reason 组合，避免模型重复生成同一内容。
+v1/v2 继续只读兼容。</p>
+<h3>9.6 Deterministic Decision Validator</h3>
+<p><strong>代码</strong></p>
+<ul>
+<li><code>src/lgagent/legal_mcq/decision.py</code></li>
+</ul>
+<p>Validator 检查：</p>
+<ul>
+<li>选项是否完整、唯一；</li>
+<li>单选和多选基数；</li>
+<li>selected options 是否属于题目；</li>
+<li>Claim ID 是否与选项绑定一致；</li>
+<li>Claim 是否重复或跨选项；</li>
+<li>正向/反向题 verdict 是否一致；</li>
+<li>单选是否存在多个目标 verdict；</li>
+<li>Option verdict 与内部 Claim verdict 是否冲突；</li>
+<li>Evidence ID 是否存在；</li>
+<li>Closed-book 是否伪造外部引用；</li>
+<li>Open-book 是否有权威、有效、非摘要证据；</li>
+<li>被选选项是否有决定性权威引用。</li>
+</ul>
+<p>模型 Verifier 可以犯错，但这些不变量不会交给模型决定。</p>
+<h3>9.7 Verifier v2</h3>
+<p>Verifier 不重新自由作答，只返回：</p>
+<pre><code class="language-json">{
+  &quot;protocol_version&quot;: &quot;verifier-v2&quot;,
+  &quot;accepted&quot;: true,
+  &quot;error_codes&quot;: [],
+  &quot;challenged_options&quot;: [],
+  &quot;suggested_selected_options&quot;: [],
+  &quot;note&quot;: &quot;&quot;
+}
+</code></pre>
+<p>约束：</p>
+<ul>
+<li>accepted=true 时其他字段必须为空；</li>
+<li>rejected 时至少有一个稳定错误码；</li>
+<li>note 最多 160 字；</li>
+<li>标签必须属于当前题目；</li>
+<li>不能同时接受又报错。</li>
+</ul>
+<p>Verifier 输入只保留题目、最小约束、Controller issues/claims、Solver decision、
+确定性错误码和必要证据，不再重复 Skill 和大段 metadata。</p>
+<h3>9.8 确定性错误直达 Revision</h3>
+<p>如果 Validator 已经发现 Claim ID、极性、证据或选项覆盖错误，第一轮 LLM
+Verifier 没有必要重复确认。系统直接生成 deterministic rejection 并进入
+唯一一次 Solver Revision。</p>
+<p>修订后仍不合法时返回：</p>
+<pre><code class="language-text">status=partial
+needs_review=true
+warnings=[稳定错误码]
+</code></pre>
+<p>这比返回一个“看起来完整但没有通过审查”的答案更安全。</p>
+<h3>9.9 Open-book 的严格证据边界</h3>
+<p>LegalMCQ 的 Open-book 路径只接收 <code>OathAuditedEvidenceProvider</code> 转换后的
+<code>LegalEvidence</code>：</p>
+<ul>
+<li>SUPPORT / REFUTE / EXCEPTION；</li>
+<li>HTTP(S) 来源；</li>
+<li>authority level；</li>
+<li>effective_from / effective_until；</li>
+<li>exact quote；</li>
+<li>content SHA-256。</li>
+</ul>
+<p>显式 Open-book 但未注入 Provider 时 fail closed。<code>search_snippet</code> 等摘要
+不能成为决定性证据。该机制降低“引用存在但不支持结论”和“引用失效法条”
+两类法律问答风险。</p>
+<h3>9.10 版本化 Skill 与工具白名单</h3>
+<p><strong>代码</strong></p>
+<ul>
+<li><code>src/lgagent/legal_mcq/skills.py</code></li>
+<li><code>src/lgagent/legal_mcq/skill_specs/legal-mcq-core.yaml</code></li>
+<li><code>src/lgagent/legal_mcq/skill_specs/legal-research.yaml</code></li>
+<li><code>src/lgagent/legal_mcq/skill_specs/legal-evaluation.yaml</code></li>
+</ul>
+<p>生产运行只加载声明允许的 Skill：</p>
+<ul>
+<li>Closed-book 和 Open-book 都加载 <code>legal-mcq-core</code>；</li>
+<li>只有 Open-book 加载 <code>legal-research</code>；</li>
+<li><code>legal-evaluation</code> 标记为隐藏，不进入生产 Prompt；</li>
+<li>Tool 名称必须位于 Skill 白名单；</li>
+<li>Skill 名称和版本写入结果诊断。</li>
+</ul>
+<p>这避免了开放式 ReAct Agent 在运行时任意发现工具，也避免评测能力或 Oracle
+说明误入生产上下文。</p>
+<h2>10. 第六阶段：真实供应商稳定性优化</h2>
+<h3>10.1 30 题失败暴露的问题</h3>
+<p>最初 30 题真实运行：</p>
+<table>
+<thead>
+<tr>
+<th>指标</th>
+<th style="text-align:right">结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>返回答案</td>
+<td style="text-align:right">8/30</td>
+</tr>
+<tr>
+<td>异常结束</td>
+<td style="text-align:right">22/30</td>
+</tr>
+<tr>
+<td>全部分母标签一致</td>
+<td style="text-align:right">7/30</td>
+</tr>
+<tr>
+<td>Solver 协议失败</td>
+<td style="text-align:right">13</td>
+</tr>
+<tr>
+<td>Controller 协议失败</td>
+<td style="text-align:right">1</td>
+</tr>
+<tr>
+<td>调用预算失败</td>
+<td style="text-align:right">3</td>
+</tr>
+<tr>
+<td>时间预算失败</td>
+<td style="text-align:right">5</td>
+</tr>
+</tbody>
+</table>
+<p>这次结果非常重要，因为它证明“单元测试通过”和“真实供应商链路健康”是两件事。</p>
+<h3>10.2 逐调用日志</h3>
+<p><strong>代码</strong></p>
+<ul>
+<li><code>src/lgagent/legal_mcq/observability.py</code></li>
+<li><code>src/lgagent/trace.py</code></li>
+<li><code>tools/run_legal_mcq.py</code></li>
+</ul>
+<p>每次逻辑调用写一对 started/finished 事件，记录：</p>
+<ul>
+<li>run ID、call ID、题号和数据索引；</li>
+<li>agent、模型、attempt；</li>
+<li>实际 timeout 和 max_tokens；</li>
+<li>调用前后预算；</li>
+<li>request ID 和供应商响应模型；</li>
+<li>finish_reason；</li>
+<li>content_state；</li>
+<li>visible content 长度和 SHA-256；</li>
+<li>prompt/completion/total tokens；</li>
+<li>reasoning tokens 和 cached tokens；</li>
+<li>refusal/tool calls；</li>
+<li>Schema 名和解析状态；</li>
+<li>outcome、错误类型和 HTTP 信息。</li>
+</ul>
+<p>默认不保存正文。显式 <code>--log-model-output</code> 时只保存脱敏后的可见正文，
+不保存隐藏 reasoning。日志文件权限为 0600，多线程写入由锁保护并逐行 flush。</p>
+<h3>10.3 SDK 响应适配</h3>
+<p>修复内容：</p>
+<ul>
+<li><code>content=null</code> 不再序列化整个 SDK message；</li>
+<li>空正文、缺失正文、拒答和 tool calls 分别分类；</li>
+<li>分段正文只提取可见 text/output_text；</li>
+<li>无 choices、无 usage 和供应商错误保留原始元数据；</li>
+<li>网络异常不伪造 finish reason；</li>
+<li>reasoning token 不与 total token 重复相加；</li>
+<li>所有角色凭据统一脱敏。</li>
+</ul>
+<p><strong>收益</strong></p>
+<p>以前“缺少 selected_options”可能其实是空正文或截断。现在故障分类能指向真实
+修复动作，不再把供应商问题误诊为法律推理错误。</p>
+<h3>10.4 结构化输出能力协商</h3>
+<p>Controller、Solver、Verifier 分别支持：</p>
+<ul>
+<li><code>auto</code>：先 Schema，供应商明确不支持时有界 prompt-only 回退；</li>
+<li><code>json_schema</code>：强制 Schema，不静默降级；</li>
+<li><code>prompt_only</code>：不发送 response_format，但保留本地校验。</li>
+</ul>
+<p>只有明确的 unsupported 错误才降级。网络错误、认证错误、空正文或普通 JSON
+错误不能触发能力降级。</p>
+<p>CommandCode 独立 dev 验证中：</p>
+<ul>
+<li>9/9 次 Schema 请求未被网关拒绝；</li>
+<li>0 次 prompt-only fallback；</li>
+<li>6/9 次调用直接通过 Solver v2；</li>
+<li>3 次失败均为 <code>finish_reason=length</code>。</li>
+</ul>
+<p>因此后续优化目标从“供应商是否支持 Schema”转向“隐藏推理挤占正文空间”。</p>
+<h3>10.5 隐藏 reasoning 管理</h3>
+<p>模型配置加入 <code>reasoning_effort</code>，同时记录请求值和实际 reasoning tokens。
+当前 CommandCode 使用 <code>low</code>：</p>
+<ul>
+<li>Qwen 辅助角色明显下降；</li>
+<li>LongCat 只把 low 当作软约束；</li>
+<li>不发送被实测静默忽略的 <code>thinking</code> 或 <code>enable_thinking</code>；</li>
+<li>不把 HTTP 200 当作供应商遵守推理预算的证据。</li>
+</ul>
+<p>ID 34 重放中，Controller reasoning 合计从 6191 降至 2048，降低 66.9%；
+整题已观察 reasoning 从 10472 降至 6844，降低 34.6%。</p>
+<h3>10.6 Solver 正文与推理预算</h3>
+<p>当前 Solver：</p>
+<ul>
+<li>可见正文目标：2048；</li>
+<li>reasoning allowance：2048；</li>
+<li>首次总上限：4096；</li>
+<li>length 后一次恢复硬上限：6144。</li>
+</ul>
+<p>只有供应商明确返回 <code>length</code> 才扩额；超时不扩额。截断正文被丢弃，重试要求
+重新生成完整 JSON，不把残缺 JSON 拼入上下文。</p>
+<p>v3 同题重放相比旧版本：</p>
+<table>
+<thead>
+<tr>
+<th>指标</th>
+<th style="text-align:right">修复前</th>
+<th style="text-align:right">v3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>全角色 length</td>
+<td style="text-align:right">10/16</td>
+<td style="text-align:right">1/15</td>
+</tr>
+<tr>
+<td>Controller length</td>
+<td style="text-align:right">2/8</td>
+<td style="text-align:right">0/5</td>
+</tr>
+<tr>
+<td>Solver length</td>
+<td style="text-align:right">8/8</td>
+<td style="text-align:right">0/7</td>
+</tr>
+<tr>
+<td>返回答案</td>
+<td style="text-align:right">0/5</td>
+<td style="text-align:right">2/5</td>
+</tr>
+</tbody>
+</table>
+<p>这证明紧凑协议和预算修复显著降低已观察截断，但 5/7 Solver 调用转为超时，
+因此继续引出了 fallback 优化。</p>
+<h3>10.7 角色级 timeout 与题级 hard deadline</h3>
+<p>当前默认：</p>
+<pre><code class="language-yaml">controller_call_timeout_seconds: 30
+solver_call_timeout_seconds: 70
+solver_fallback_timeout_seconds: 45
+verifier_call_timeout_seconds: 30
+max_wall_time_seconds: 180
+</code></pre>
+<p>题级 deadline 不只在下一次调用前检查，还通过请求 timeout 和 watchdog 限制
+进行中的调用。SDK 自动重试固定为 0，使一个逻辑调用对应一次可审计尝试。</p>
+<h3>10.8 下游资源预留</h3>
+<p>每次调用前估算：</p>
+<pre><code class="language-text">prompt tokens
++ response schema tokens
++ 当前最大输出
++ 后续必需阶段保留
+</code></pre>
+<p>Revision 只有在“Revision + 可能 fallback + Final Verifier”整体可容纳时才开始。
+预算不足时保留当前候选并返回 partial，不执行残缺修订。</p>
+<p>调用边界：</p>
+<table>
+<thead>
+<tr>
+<th>路径</th>
+<th style="text-align:right">调用数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>正常</td>
+<td style="text-align:right">3</td>
+</tr>
+<tr>
+<td>主 Solver timeout + fallback</td>
+<td style="text-align:right">4</td>
+</tr>
+<tr>
+<td>完整 Revision</td>
+<td style="text-align:right">5</td>
+</tr>
+<tr>
+<td>Revision Solver timeout + fallback</td>
+<td style="text-align:right">6</td>
+</tr>
+<tr>
+<td>题级硬上限</td>
+<td style="text-align:right">7</td>
+</tr>
+</tbody>
+</table>
+<h3>10.9 异构 fallback</h3>
+<p>主 Solver timeout 后：</p>
+<ol>
+<li>不重试同一模型；</li>
+<li>记录 timeout 路由；</li>
+<li>检查剩余 calls、tokens 和 Final Verifier 墙钟；</li>
+<li>调用一次备用 Solver；</li>
+<li>fallback 仍使用 Solver v3 Schema；</li>
+<li>fallback 后不再启动无限业务 Revision。</li>
+</ol>
+<h3>10.10 Runner 级熔断</h3>
+<p><code>SolverTimeoutCircuitBreaker</code> 由 Runner 持有并用锁保护：</p>
+<ul>
+<li>主 Solver 成功：连续 timeout 清零；</li>
+<li>非 timeout 失败：不按超时计数；</li>
+<li>连续两次主 Solver timeout：熔断打开；</li>
+<li>同批后续题：直接走备用 Solver；</li>
+<li>不跨进程持久化。</li>
+</ul>
+<p>真实故障注入中：</p>
+<ul>
+<li>前两题触发主 Solver timeout；</li>
+<li>后三题全部绕过主模型；</li>
+<li>fallback API + Schema 成功 5/5；</li>
+<li>严格 completed 4/5；</li>
+<li>唯一 partial 为 Controller v2 Claim 误挂，后由 v3 修复。</li>
+</ul>
+<h3>10.11 Controller v3 的真实闭环</h3>
+<p>题 259 修复前：</p>
+<pre><code class="language-text">fallback stop + Schema valid
+-&gt; Claim ID 覆盖错误
+-&gt; partial
+</code></pre>
+<p>Controller v3 修复后真实重放：</p>
+<pre><code class="language-text">Controller v3
+-&gt; LongCat 1 秒故障注入 timeout
+-&gt; Qwen fallback
+-&gt; Verifier v2 accepted
+-&gt; completed
+</code></pre>
+<p>结果：</p>
+<ul>
+<li>selected option：C；</li>
+<li>exact match：true；</li>
+<li>warnings：空；</li>
+<li>needs_review：false；</li>
+<li>4 次逻辑调用；</li>
+<li>46.88 秒；</li>
+<li>6380 个已观察 total tokens；</li>
+<li>无 length；</li>
+<li>无 prompt-only Schema 降级；</li>
+<li>无凭据泄漏。</li>
+</ul>
+<h3>10.12 前沿模型角色升级</h3>
+<p>CommandCode 实时模型列表和账户探针完成后，当前角色调整为：</p>
+<ul>
+<li>Controller：Qwen/Qwen3.7-Flash；</li>
+<li>Strong Solver：gpt-5.6-sol；</li>
+<li>fallback Solver：Qwen/Qwen3.8-Max-0902；</li>
+<li>Verifier：Qwen/Qwen3.7-Flash。</li>
+</ul>
+<p>GPT-5.6 Sol 是当前账户可直接调用的高能力模型，并已真实返回合法 Solver v3。
+Claude Fable 5.1 和 Claude Opus 5 虽进入候选，但当前账户返回
+<code>unsupported_model</code>。GLM、Gemini、Muse 和 DeepSeek 的部分短输出或真实
+Verifier 请求发生 reasoning-only length，因此没有仅凭榜单分数写入配置。</p>
+<p>探针同时修复了 fallback 后仍为禁用 Revision 预留调用位的问题。当前只有
+确实允许 Revision 时，第一轮 Verifier 才预留下游修订预算。</p>
+<h2>11. 为什么这些优化能改善法律回答</h2>
+<h3>11.1 先保证“答的是正确问题”</h3>
+<p>极性和时点是法律问题的入口条件。若把“不正确”解析成“正确”，或把 2023 年
+假设解析成 1997 年，后续模型再强也会在错误任务上推理。确定性解析直接消除
+这类上游系统性错误。</p>
+<h3>11.2 把事实整理权与答案决定权分开</h3>
+<p>Controller 不能输出答案字段，v3 甚至不能改写选项 Claim。它只能帮助 Solver
+看到事实、争点和核验点，不能通过“结构化”偷偷决定答案。</p>
+<h3>11.3 强模型只做最有价值的工作</h3>
+<p>Strong Solver 是唯一主答题者；Controller 和 Verifier 使用更经济模型。
+这将昂贵能力集中在规则适用和选项裁决，而不是格式整理和流程检查。</p>
+<h3>11.4 对所有选项作同一尺度的判断</h3>
+<p>系统要求每个选项都有唯一 assessment。选择正确项时必须证明其 supported；
+选择错误项时必须证明其 contradicted。这样减少“先选一个看起来熟悉的答案，
+再只解释这个答案”的确认偏差。</p>
+<h3>11.5 复合选项按整体命题守恒</h3>
+<p>Controller v3 把完整原始选项作为唯一规范 Claim。Solver 可在 reason 中分析
+多个组成部分，但不能丢失原文条件、把半句话移动到其他选项或通过重新措辞
+改变判断对象。</p>
+<h3>11.6 法律证据必须同时满足相关、权威和时效</h3>
+<p>OATH-RAG 与 Validator 共同检查：</p>
+<ul>
+<li>是否支持当前选项；</li>
+<li>是否来自允许的来源；</li>
+<li>是否达到权威阈值；</li>
+<li>是否在题目日期有效；</li>
+<li>是否是全文片段而非搜索摘要；</li>
+<li>是否真的被最终理由引用。</li>
+</ul>
+<p>这比“搜到相似网页”更接近法律论证对法源的要求。</p>
+<h3>11.7 主动寻找反驳和例外</h3>
+<p>法律规则经常由但书决定。support/refute/exception 三车道与 Exception
+Verifier 强制系统检查“为什么这个选项可能错”，降低单向确认偏差。</p>
+<h3>11.8 让不确定性影响计算，而不是只作为装饰</h3>
+<p>风险分数、B0 confidence、NEI、证据缺失和模型分歧会改变后续动作。
+低风险题停止，高风险题才增加核验或检索，从而在固定成本下把计算放到更可能
+出错的题目。</p>
+<h3>11.9 失败时保持诚实</h3>
+<p>系统区分：</p>
+<ul>
+<li><code>completed</code></li>
+<li><code>partial</code></li>
+<li><code>blocked</code></li>
+<li>provider/schema/budget/deadline 错误</li>
+</ul>
+<p>无法完成最后核验时不把候选伪装成完成答案。对法律系统而言，显式暴露不确定性
+通常比给出无法审计的高置信结论更重要。</p>
+<h3>11.10 供应商不稳定不再直接等于整题失败</h3>
+<p>主 Solver 超时后可切备用模型；连续超时会熔断。结构化输出能力不支持时有
+显式兼容路径。这提高的是“取得可审查答案”的概率，而不是假设任何单一模型
+永远可靠。</p>
+<h2>12. 项目真正有价值的技术特点</h2>
+<h3>12.1 不是 Prompt 链，而是协议状态机</h3>
+<p>每个角色都有输入、输出、Schema、错误、预算和状态转移。模型输出只是候选
+状态，不能直接成为最终答案。</p>
+<h3>12.2 模型负责推理，代码负责不变量</h3>
+<p>系统没有尝试用正则表达式完成法律推理；代码只控制：</p>
+<ul>
+<li>谁能看到什么；</li>
+<li>谁能选择答案；</li>
+<li>Claim 属于哪个选项；</li>
+<li>引用是否存在；</li>
+<li>法源是否有效；</li>
+<li>是否允许修订；</li>
+<li>预算是否足够；</li>
+<li>最终状态是否可信。</li>
+</ul>
+<p>这是比“再加一个审稿模型”更坚实的工程分工。</p>
+<h3>12.3 Claim 身份由可信输入决定</h3>
+<p>Controller v3 的确定性 Claim 绑定是当前最有辨识度的改进之一。它解决了
+多 Agent 系统常见但很少被显式处理的问题：上游 Agent 在重述任务时可能改变
+任务本身。LGAgent v5 允许模型解释语义，但不允许模型拥有语义对象的身份。</p>
+<h3>12.4 预算预留具有事务语义</h3>
+<p>系统不是“有余额就调用”，而是先判断完整后续链路能否提交。Revision 必须
+连同 Final Verifier 一起可负担，否则不开始。这类似事务的 all-or-nothing
+约束，避免得到无法验证的半成品。</p>
+<h3>12.5 可观测性覆盖隐藏推理供应商</h3>
+<p>系统同时记录：</p>
+<ul>
+<li>请求的 reasoning_effort；</li>
+<li>供应商实际 reasoning tokens；</li>
+<li>可见正文长度；</li>
+<li>finish reason；</li>
+<li>usage 是否未知；</li>
+<li>provider 是否可能仍在后台运行。</li>
+</ul>
+<p>因此可以识别“参数被接受但没有真正生效”，而不是只看 HTTP 200。</p>
+<h3>12.6 创新模块有 no-harm 思维</h3>
+<p>CLIR 不把搜索或验证视为天然有益，而是要求干预相对 Original 的收益下界为正。
+这种“干预可能伤害答案”的建模比无条件 Agent 堆叠更符合真实系统表现。</p>
+<h3>12.7 负结果被保留为研究证据</h3>
+<p>项目明确记录：</p>
+<ul>
+<li>Web 100 题从 50% 降到 49%；</li>
+<li>纠正 1 题、伤害 5 题；</li>
+<li>早期 Joint 65 题失败 53 题；</li>
+<li>30 题 LegalMCQ 只返回 8 题；</li>
+<li>Schema 成功不等于端到端成功；</li>
+<li>fallback API 成功不等于严格 completed。</li>
+</ul>
+<p>这种证据纪律使后续论文结论更可信。</p>
+<h2>13. 历次关键修改与流程变化</h2>
+<table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>主要问题</th>
+<th>修改后的流程</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>原始 LGAgent</td>
+<td>单模型推理不透明</td>
+<td>Lawyer A → Judge → B0 → B1</td>
+<td>建立结构化协作</td>
+</tr>
+<tr>
+<td>Baseline 修复</td>
+<td>输出与路由不稳定</td>
+<td>typed protocol + bounded retry</td>
+<td>错误可显式处理</td>
+</tr>
+<tr>
+<td>LGAgent++ 初版</td>
+<td>检索和验证未形成闭环</td>
+<td>OATH → Audit → CAPE → Risk</td>
+<td>形成证据化候选系统</td>
+</tr>
+<tr>
+<td>通路审计</td>
+<td>高风险无真实重检索、反事实未接入</td>
+<td>targeted retrieval + counterfactual Runner</td>
+<td>测试路径与配置一致</td>
+</tr>
+<tr>
+<td>性能修复</td>
+<td>每题重复建 BM25</td>
+<td>实验级共享 corpus/index</td>
+<td>降低重复开销</td>
+</tr>
+<tr>
+<td>预算修复</td>
+<td>模型调用分散计费</td>
+<td>共享 ExecutionBudget</td>
+<td>calls/tokens/time 统一</td>
+</tr>
+<tr>
+<td>复现修复</td>
+<td>seed/domain 丢失</td>
+<td>派生 seed + domain 优先级</td>
+<td>指标可复现、可分组</td>
+</tr>
+<tr>
+<td>数据构建</td>
+<td>七维样本不平衡</td>
+<td>每维 80、seeded sampling</td>
+<td>560 题 LexGenius</td>
+</tr>
+<tr>
+<td>Web 原型</td>
+<td>搜索无约束会伤害答案</td>
+<td>触发器 + 来源门 + token cap</td>
+<td>工程完成，效果否定</td>
+</tr>
+<tr>
+<td>C-LEX</td>
+<td>无校准的候选过滤</td>
+<td>split conformal threshold</td>
+<td>原型完成，默认关闭</td>
+</tr>
+<tr>
+<td>CLIR</td>
+<td>不知道何时干预</td>
+<td>paired uplift + LCB + cost</td>
+<td>no-harm 原型</td>
+</tr>
+<tr>
+<td>LegalMCQ 接入</td>
+<td>技术包与现仓库边界不一致</td>
+<td>独立 package + opt-in route</td>
+<td>无替代工程、可回滚</td>
+</tr>
+<tr>
+<td>30 题审计</td>
+<td>22/30 异常</td>
+<td>先保存失败事实再分层修复</td>
+<td>建立真实问题清单</td>
+</tr>
+<tr>
+<td>日志修复</td>
+<td>无法判断截断/空响应/重试</td>
+<td>calls.jsonl + Trace</td>
+<td>每次调用可复盘</td>
+</tr>
+<tr>
+<td>输入修复</td>
+<td>极性和日期错误</td>
+<td>final directive + date priority</td>
+<td>修复典型题</td>
+</tr>
+<tr>
+<td>响应修复</td>
+<td>null/tool call 被当答案</td>
+<td>content-state adapter</td>
+<td>故障正确归类</td>
+</tr>
+<tr>
+<td>预算修复</td>
+<td>180 秒非硬限制</td>
+<td>watchdog + downstream reserve</td>
+<td>超时与费用有界</td>
+</tr>
+<tr>
+<td>Controller v2</td>
+<td>自由 JSON 和自编号</td>
+<td>strict Schema + code IDs</td>
+<td>格式显著稳定</td>
+</tr>
+<tr>
+<td>Solver v2</td>
+<td>输出结构不稳定</td>
+<td>compact Schema</td>
+<td>CommandCode 可接受</td>
+</tr>
+<tr>
+<td>reasoning 优化</td>
+<td>隐藏推理挤压正文</td>
+<td>low + telemetry</td>
+<td>辅助角色推理下降</td>
+</tr>
+<tr>
+<td>Solver v3</td>
+<td>issues/rationale 重复</td>
+<td>删除重复字段</td>
+<td>Solver length 8/8→0/7</td>
+</tr>
+<tr>
+<td>Verifier v2</td>
+<td>输出过长</td>
+<td>384→512 有界恢复</td>
+<td>实测无新 length</td>
+</tr>
+<tr>
+<td>fallback + 熔断</td>
+<td>LongCat 大量超时</td>
+<td>70s 主 + 45s 备用 + threshold 2</td>
+<td>真实 5/5 API 成功</td>
+</tr>
+<tr>
+<td>Controller v3</td>
+<td>Claim 跨选项误挂</td>
+<td>原始选项确定性绑定</td>
+<td>题 259 partial→completed</td>
+</tr>
+<tr>
+<td>前沿模型升级</td>
+<td>免费主模型持续超时</td>
+<td>GPT-5.6 Sol 主答 + Qwen3.8 Max 备用</td>
+<td>主/备用 Schema 路径均已实测</td>
+</tr>
+</tbody>
+</table>
+<h2>14. 当前真实验证证据</h2>
+<h3>14.1 原工程基线</h3>
+<p>Qwen3-8B、LexGenius 100、seed 42 的重复结果约为 50%-52%，且 100/100
+样本成功。考虑供应商非确定性，应报告为工程参考区间，不把单次 52% 当作
+精确总体性能。</p>
+<h3>14.2 Web Search</h3>
+<p>同批 100 题：</p>
+<ul>
+<li>Original：50%；</li>
+<li>Web：49%；</li>
+<li>Web 纠正 1 题；</li>
+<li>Web 伤害 5 题。</li>
+</ul>
+<p>结论：当前网页搜索不构成准确率创新。</p>
+<h3>14.3 LegalMCQ 稳定性演进</h3>
+<table>
+<thead>
+<tr>
+<th>版本/阶段</th>
+<th style="text-align:right">样本</th>
+<th style="text-align:right">返回/完成</th>
+<th>关键现象</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>早期 30 题</td>
+<td style="text-align:right">30</td>
+<td style="text-align:right">返回 8</td>
+<td>协议、预算、超时、解析均有问题</td>
+</tr>
+<tr>
+<td>Schema dev</td>
+<td style="text-align:right">5</td>
+<td style="text-align:right">completed 3</td>
+<td>Schema 可用，但 3 次 length</td>
+</tr>
+<tr>
+<td>v2 健康检查</td>
+<td style="text-align:right">5</td>
+<td style="text-align:right">completed 0</td>
+<td>10/16 次 length</td>
+</tr>
+<tr>
+<td>v3 同题重放</td>
+<td style="text-align:right">5</td>
+<td style="text-align:right">completed 2</td>
+<td>length 降至 1/15，Solver 超时 5/7</td>
+</tr>
+<tr>
+<td>v4 fallback 自然运行</td>
+<td style="text-align:right">5</td>
+<td style="text-align:right">completed 4</td>
+<td>1 次 fallback API 成功，Claim 错误致 partial</td>
+</tr>
+<tr>
+<td>v4 故障注入</td>
+<td style="text-align:right">5</td>
+<td style="text-align:right">completed 4</td>
+<td>fallback 5/5，熔断绕过 3 次</td>
+</tr>
+<tr>
+<td>v5 题 259 重放</td>
+<td style="text-align:right">1</td>
+<td style="text-align:right">completed 1</td>
+<td>Claim 错误清零，Verifier 接受</td>
+</tr>
+<tr>
+<td>v5 冻结 dev pilot</td>
+<td style="text-align:right">10</td>
+<td style="text-align:right">completed 9</td>
+<td>10/10 返回、50% EM、0 Claim/Schema/length 错误</td>
+</tr>
+</tbody>
+</table>
+<p>这些数据证明链路可靠性持续提高，但样本规模和调试复用决定了它们不是正式
+准确率显著性证据。</p>
+<h3>14.4 v5 冻结 dev10 pilot</h3>
+<p>在冻结 LexGenius dev 上运行题号
+<code>23/69/88/113/122/127/156/227/235/265</code>。其中 9 题未在此前 LegalMCQ
+结果中出现，ID 23 是早期失败题；该重叠在运行后审计发现并保留在分母中。</p>
+<p>结果为：</p>
+<ul>
+<li>10/10 返回；</li>
+<li>9/10 completed，1/10 partial；</li>
+<li>5/10 Exact Match；</li>
+<li>Controller v3、fallback Solver v3、Verifier v2 均 10/10 Schema 成功；</li>
+<li>0 length、0 Schema error、0 Controller Claim error；</li>
+<li>主 LongCat 前两题均超时，熔断后 8 题直接走 Qwen fallback；</li>
+<li>10/10 fallback API + Schema 成功；</li>
+<li>5 个错误答案中有 5 个被 Verifier 接受。</li>
+</ul>
+<p>本轮证明 v5 工程链路健康度提升，但没有证明准确率超过历史 Original
+约 50%-52%。同源 Qwen fallback 与 Verifier 的错误相关性，是当前法律质量
+的主要风险之一。完整报告见
+<code>docs/legal_mcq_v5_dev10_real_run_20260912.md</code>。</p>
+<h2>15. 当前配置</h2>
+<p>核心配置位于 <code>examples/parameter/legal2_rag_parameter.yaml</code>：</p>
+<pre><code class="language-yaml">legal_mcq:
+  enabled: false
+  mode: closed_book
+  seed: 42
+  max_attempts: 2
+  max_revision_rounds: 1
+  max_model_calls: 7
+  max_total_tokens: 65536
+  max_wall_time_seconds: 360
+  controller_call_timeout_seconds: 30
+  solver_call_timeout_seconds: 120
+  solver_fallback_timeout_seconds: 90
+  verifier_call_timeout_seconds: 45
+  solver_timeout_retries: 0
+  solver_timeout_circuit_breaker: 2
+  controller_structured_output_mode: auto
+  solver_structured_output_mode: auto
+  verifier_structured_output_mode: auto
+  solver_visible_output_tokens: 2048
+  solver_reasoning_allowance_tokens: 6144
+  verifier_visible_output_tokens: 384
+  verifier_length_retry_tokens: 512
+  skip_verifier_on_deterministic_errors: true
+  auxiliary_reasoning_reserve_tokens: 2048
+  prompt_version: legal-mcq-three-role-v5
+</code></pre>
+<p>示例角色：</p>
+<ul>
+<li>Controller：<code>Qwen/Qwen3.7-Flash</code>；</li>
+<li>主 Solver：<code>gpt-5.6-sol</code>；</li>
+<li>fallback Solver：<code>Qwen/Qwen3.8-Max-0902</code>；</li>
+<li>Verifier：<code>Qwen/Qwen3.7-Flash</code>。</li>
+</ul>
+<p>角色凭据支持：</p>
+<ul>
+<li><code>LGAGENT_CONTROLLER_API_KEY</code></li>
+<li><code>LGAGENT_SOLVER_API_KEY</code></li>
+<li><code>LGAGENT_SOLVER_FALLBACK_API_KEY</code></li>
+<li><code>LGAGENT_LEGAL_VERIFIER_API_KEY</code></li>
+<li>最后回退到 <code>LLM_API_KEY</code></li>
+</ul>
+<p>相同 endpoint/key 的角色共享底层 OpenAI client。</p>
+<h2>16. 回滚与部署安全</h2>
+<p>完整关闭 LegalMCQ：</p>
+<pre><code class="language-yaml">legal_mcq:
+  enabled: false
+</code></pre>
+<p>关闭全部研究创新：</p>
+<pre><code class="language-yaml">lgagent_plus:
+  enabled: false
+</code></pre>
+<p>单独关闭 fallback：删除 <code>solver_fallback_model</code>。<br />
+恢复旧核验顺序：设置 <code>skip_verifier_on_deterministic_errors: false</code>。<br />
+关闭 Web、C-LEX、OATH、CAPE：保持各模块 <code>enabled: false</code>。</p>
+<p>关闭后不会构造或调用对应角色模型，不需要删除代码或回滚数据。</p>
+<h2>17. 代码地图</h2>
+<table>
+<thead>
+<tr>
+<th>文件</th>
+<th>主要责任</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>src/lgagent/domain.py</code></td>
+<td>原始 LGAgent 单题三角色流程</td>
+</tr>
+<tr>
+<td><code>src/lgagent/protocol.py</code></td>
+<td>原始角色严格协议</td>
+</tr>
+<tr>
+<td><code>src/lgagent/runner.py</code></td>
+<td>全路线统一入口、预算、风险和 fallback 生命周期</td>
+</tr>
+<tr>
+<td><code>src/lgagent/config.py</code></td>
+<td>类型化配置和互斥/预算校验</td>
+</tr>
+<tr>
+<td><code>src/lgagent/model.py</code></td>
+<td>模型请求、响应适配、hard deadline、seed、预算</td>
+</tr>
+<tr>
+<td><code>src/lgagent/trace.py</code></td>
+<td>调用与路由追踪</td>
+</tr>
+<tr>
+<td><code>src/lgagent/oath_rag.py</code></td>
+<td>三车道混合检索和共享 BM25</td>
+</tr>
+<tr>
+<td><code>src/lgagent/evidence_audit.py</code></td>
+<td>证据逐项审计</td>
+</tr>
+<tr>
+<td><code>src/lgagent/cape_v.py</code></td>
+<td>多候选、IRAC、选项排列</td>
+</tr>
+<tr>
+<td><code>src/lgagent/verification.py</code></td>
+<td>五维核验</td>
+</tr>
+<tr>
+<td><code>src/lgagent/risk.py</code></td>
+<td>风险分数、自适应路径、确定性聚合</td>
+</tr>
+<tr>
+<td><code>src/lgagent/counterfactual.py</code></td>
+<td>可信反事实变换</td>
+</tr>
+<tr>
+<td><code>src/lgagent/web_search.py</code></td>
+<td>BOLT-Web 预算搜索</td>
+</tr>
+<tr>
+<td><code>src/lgagent/clex.py</code></td>
+<td>C-LEX conformal elimination</td>
+</tr>
+<tr>
+<td><code>src/lgagent/clir.py</code></td>
+<td>CLIR 配对 uplift 与安全路由</td>
+</tr>
+<tr>
+<td><code>src/lgagent/evaluation.py</code></td>
+<td>全量指标、统计检验、checkpoint</td>
+</tr>
+<tr>
+<td><code>src/lgagent/experiment_freeze.py</code></td>
+<td>数据、配置和源码冻结</td>
+</tr>
+<tr>
+<td><code>src/lgagent/experiment_runner.py</code></td>
+<td>多数据集、多配置、多 seed 执行</td>
+</tr>
+<tr>
+<td><code>src/lgagent/legal_mcq/adapter.py</code></td>
+<td>Request / Oracle 隔离</td>
+</tr>
+<tr>
+<td><code>src/lgagent/legal_mcq/parser.py</code></td>
+<td>题目、极性、日期解析</td>
+</tr>
+<tr>
+<td><code>src/lgagent/legal_mcq/models.py</code></td>
+<td>Controller/Solver/Verifier 协议</td>
+</tr>
+<tr>
+<td><code>src/lgagent/legal_mcq/agent.py</code></td>
+<td>v5 三角色状态机</td>
+</tr>
+<tr>
+<td><code>src/lgagent/legal_mcq/decision.py</code></td>
+<td>确定性法律流程不变量</td>
+</tr>
+<tr>
+<td><code>src/lgagent/legal_mcq/evidence.py</code></td>
+<td>OATH 到 LegalEvidence 适配</td>
+</tr>
+<tr>
+<td><code>src/lgagent/legal_mcq/clients.py</code></td>
+<td>多角色客户端与凭据隔离</td>
+</tr>
+<tr>
+<td><code>src/lgagent/legal_mcq/observability.py</code></td>
+<td>脱敏逐调用日志</td>
+</tr>
+<tr>
+<td><code>src/lgagent/legal_mcq/skills.py</code></td>
+<td>版本化 Skill 与工具白名单</td>
+</tr>
+<tr>
+<td><code>tools/run_legal_mcq.py</code></td>
+<td>dry-run/execute 数据集入口</td>
+</tr>
+<tr>
+<td><code>tools/run_task16_experiments.py</code></td>
+<td>冻结实验入口</td>
+</tr>
+</tbody>
+</table>
+<h2>18. 验证覆盖</h2>
+<p>当前全仓 <code>321 passed</code>。重点覆盖：</p>
+<ul>
+<li>JSON 协议解析和答案字段泄漏；</li>
+<li>全角、跨行、重复和缺失选项；</li>
+<li>正反向题与日期优先级；</li>
+<li>v1/v2/v3 协议兼容；</li>
+<li>Controller v3 确定性 Claim；</li>
+<li>单选、多选与 Option/Claim verdict 一致性；</li>
+<li>Open-book 权威、时效、引用和摘要限制；</li>
+<li>JSON Schema SDK 透传；</li>
+<li>null/empty/refusal/tool calls/multipart；</li>
+<li>finish reason 和 reasoning usage；</li>
+<li>调用前/响应后预算；</li>
+<li>hard deadline；</li>
+<li>length 一次恢复；</li>
+<li>timeout fallback；</li>
+<li>两次 timeout 后熔断；</li>
+<li>deterministic error 直达修订；</li>
+<li>并发日志和凭据脱敏；</li>
+<li>checkpoint、冻结、seed、领域统计；</li>
+<li>OATH、CAPE、Web、C-LEX、CLIR 的离线路径。</li>
+</ul>
+<p>唯一测试 warning 来自第三方 Authlib 弃用提示，不是本项目失败。</p>
+<h2>19. 当前限制</h2>
+<ol>
+<li>LegalMCQ v5 尚未在大规模独立测试集上与 Original 做三 seed 对照；</li>
+<li>题 259 的成功重放证明已观察故障被修复，不证明总体准确率提升；</li>
+<li>GPT-5.6 Sol 的高强度 reasoning 延迟和成本明显高于旧 fallback；</li>
+<li><code>reasoning_effort</code> 仍是供应商软约束；</li>
+<li>Open-book CLI 尚不自动注入 OATH Provider；</li>
+<li>社区法律语料可复现，但不等于官方法源认证；</li>
+<li>Verifier 接受只表示流程审查通过，不等于法律结论必然正确；</li>
+<li>C-LEX、CLIR 和 Web 仍是研究原型，默认关闭；</li>
+<li>API 模型即使接收 seed，也不保证字节级确定性；</li>
+<li>Web 实现允许最多 2 次搜索，但正式研究预算要求冻结为每题最多 1 次；</li>
+<li>当前系统服务于研究型法律选择题，不应直接当作正式法律意见。</li>
+</ol>
+<h2>20. 正式论文应如何表述</h2>
+<h3>可以表述</h3>
+<ul>
+<li>提出可审计、训练免费的法律多智能体推理框架；</li>
+<li>实现答案中立结构、唯一主答题者和独立规范核验；</li>
+<li>提出 Request/Oracle 隔离，防止 benchmark 标签泄漏；</li>
+<li>提出选项身份保持的确定性 Claim 绑定；</li>
+<li>实现法域、权威、时效和 exact-span 证据审计；</li>
+<li>实现预算预留、hard deadline、异构 fallback 和批次熔断；</li>
+<li>构建七维平衡、可复现的 LexGenius 560 数据集；</li>
+<li>建立对干预负迁移敏感的 CLIR no-harm 路由原型；</li>
+<li>通过真实供应商实验证明 Schema、fallback、熔断和 v5 故障恢复路径可运行。</li>
+</ul>
+<h3>暂时不能表述</h3>
+<ul>
+<li>“LegalMCQ v5 已显著提高总体准确率”；</li>
+<li>“Web Search 可以提高法律问答效果”；</li>
+<li>“CLIR 已证明因果个体化收益”；</li>
+<li>“Verifier accepted 等于答案正确”；</li>
+<li>“fallback 供应商成功率长期为 100%”；</li>
+<li>“固定 seed 可使第三方 API 完全确定”。</li>
+</ul>
+<h2>21. 下一阶段实验方案</h2>
+<h3>21.1 工程门槛</h3>
+<p>先使用至少 20-50 道全新 dev 题确认：</p>
+<ul>
+<li>completed rate；</li>
+<li>initial primary timeout；</li>
+<li>fallback API/Schema success；</li>
+<li>fallback strict recovery；</li>
+<li>circuit bypass；</li>
+<li>Controller/Verifier length；</li>
+<li>Claim mismatch；</li>
+<li>平均 calls、tokens 和 latency。</li>
+</ul>
+<h3>21.2 冻结模型选择</h3>
+<p>在至少 200 道独立 dev 题上选择：</p>
+<ul>
+<li>Controller 模型；</li>
+<li>主 Solver；</li>
+<li>fallback Solver；</li>
+<li>Verifier；</li>
+<li>timeout 和 token；
+-是否启用 open-book。</li>
+</ul>
+<p>选择完成后冻结全部参数，不再查看 test 调参。</p>
+<h3>21.3 正式测试</h3>
+<ul>
+<li>数据：LexGenius、CAIL2022、LawBench；</li>
+<li>split：冻结 test；</li>
+<li>seeds：42、43、44；</li>
+<li>对照：Original vs LegalMCQ v5；</li>
+<li>失败样本保留分母；</li>
+<li>报告配对 bootstrap 和 McNemar；</li>
+<li>同时报 Corrected/Harmed；</li>
+<li>报告总体与七维结果；</li>
+<li>报告 completed、partial、超时、token 和延迟。</li>
+</ul>
+<h3>21.4 创新实验</h3>
+<p>只有在三角色链路稳定后再依次测试：</p>
+<ol>
+<li>LegalMCQ v5 + OATH audited evidence；</li>
+<li>LegalMCQ v5 + CLIR 路由；</li>
+<li>CLIR 动作集合加入 fallback、检索和追加核验；</li>
+<li>每个创新都与相同 Original 配对，而不是跨批次比较。</li>
+</ol>
+<h2>22. 总结</h2>
+<p>LGAgent 当前最重要的成果不是“增加了多少 Agent”，而是建立了一套法律推理
+控制系统：</p>
+<ul>
+<li>输入语义由确定性解析保护；</li>
+<li>评测标签由 Oracle 边界隔离；</li>
+<li>Controller 无权决定答案；</li>
+<li>Strong Solver 是唯一主答题者；</li>
+<li>每个选项通过固定 Claim 身份被完整核验；</li>
+<li>Verifier 只能审查，不能无限改写；</li>
+<li>证据必须满足来源、权威、时效和引用约束；</li>
+<li>调用、token、时间、修订和 fallback 都有硬边界；</li>
+<li>每次真实调用都可追踪；</li>
+<li>失败被保留而不是隐藏；</li>
+<li>未证明有效的创新默认关闭。</li>
+</ul>
+<p>这些机制提高了法律回答过程的正确性、稳定性、可解释性和可复现性。项目已经
+从“Prompt 驱动的多角色对话”推进到“确定性边界包围概率推理核心”的状态。
+下一步真正决定论文贡献强度的，不是继续增加模块，而是在冻结 v5 后完成独立、
+多数据集、多 seed 的配对实验，证明这些过程优势能稳定转化为准确率提升。</p>
+<h2>23. 主要工件</h2>
+<ul>
+<li>当前配置：<code>examples/parameter/legal2_rag_parameter.yaml</code></li>
+<li>当前冻结：<code>docs/task16_experiment_freeze.json</code></li>
+<li>LegalMCQ 总说明：<code>docs/legal_mcq_super_optimization.md</code></li>
+<li>30 题失败分析：<code>docs/legal_mcq_failure_analysis_20260909.md</code></li>
+<li>调用日志说明：<code>docs/legal_mcq_call_logging.md</code></li>
+<li>Schema 验证：<code>docs/legal_mcq_commandcode_schema_validation_20260911.md</code></li>
+<li>reasoning 优化：<code>docs/legal_mcq_reasoning_budget_optimization_20260911.md</code></li>
+<li>v3 截断对照：<code>docs/legal_mcq_io_v3_real_replay_20260912.md</code></li>
+<li>fallback 验证：<code>docs/legal_mcq_fallback_provider_validation_20260912.md</code></li>
+<li>v5 题 259 工件：<code>output/legal_mcq/claim-binding-q259-20260912/</code></li>
+<li>前沿模型升级：<code>docs/legal_mcq_frontier_model_upgrade_20260912.md</code></li>
+<li>C-LEX 原型：<code>src/lgagent/clex.py</code></li>
+<li>CLIR 原型说明：<code>docs/clir_prototype.md</code></li>
+<li>LexGenius manifest：<code>data/LexGenius.manifest.json</code></li>
+</ul>
+</body></html>

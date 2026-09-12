@@ -17,12 +17,18 @@ DEFAULT_SPLIT_SEED = 20260826
 DEFAULT_RUN_SEEDS = (42, 43, 44)
 DEFAULT_RATIOS = {"train": 8000, "dev": 1000, "test": 1000}
 DEFAULT_PRIMARY_DATASETS = (
-    "data/Ability_merged.jsonl",
+    "data/LexGenius.jsonl",
     "data/CAIL2022.jsonl",
     "data/lawbench_merged.jsonl",
 )
 PROMPT_VERSION = "lgagent-plus-structured-prompts-v1"
-MAIN_EXPERIMENT_KEYS = ("original", "oath-only", "cape-only", "joint")
+MAIN_EXPERIMENT_KEYS = (
+    "original",
+    "web-search",
+    "oath-only",
+    "cape-only",
+    "joint",
+)
 SINGLE_FACTOR_ABLATION_KEYS = (
     "no-refute",
     "no-exception",
@@ -193,11 +199,22 @@ def build_freeze_manifest(
         "src/lgagent/verification.py",
         "src/lgagent/evidence_audit.py",
         "src/lgagent/counterfactual.py",
+        "src/lgagent/clex.py",
         "src/lgagent/oath_rag.py",
         "src/lgagent/risk.py",
         "src/lgagent/model.py",
+        "src/lgagent/protocol.py",
         "src/lgagent/runner.py",
         "src/lgagent/experiment_runner.py",
+        "src/lgagent/web_search.py",
+        "src/lgagent/config.py",
+        "src/lgagent/trace.py",
+        "tools/run_legal_mcq.py",
+        *sorted(
+            str(path.relative_to(root))
+            for path in (root / "src/lgagent/legal_mcq").rglob("*")
+            if path.suffix in {".py", ".yaml"}
+        ),
     )
     dataset_entries: dict[str, Any] = {}
     for relative in datasets:

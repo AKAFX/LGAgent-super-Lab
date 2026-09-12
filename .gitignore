@@ -44,6 +44,8 @@ data/**/*.xlsx
 # Local IDE and virtual environments
 .venv/
 .tools/
+.dbg/
+debug-*.md
 
 # Example configuration files
 examples/parameter/*.yaml

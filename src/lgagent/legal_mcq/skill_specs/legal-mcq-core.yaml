@@ -1,0 +1,11 @@
+name: legal-mcq-core
+display_name: Legal MCQ Core
+version: "1.0.0"
+description: Structured legal multiple-choice analysis and option adjudication.
+reference: |
+  Parse polarity and time before reasoning. Decompose every option into required
+  atomic claims. Judge each claim as supported, contradicted, or uncertain.
+  Do not invent statutes, citations, or evaluation labels.
+extra_tools:
+  - prepare_legal_answer
+hidden_from_catalog: false

@@ -672,6 +672,70 @@ def evaluate_result_records(
         and not isinstance(record.get("risk_score"), bool)
         and 0.0 <= float(record["risk_score"]) <= 1.0
     ]
+    clex_rows: list[tuple[set[str], set[str], bool]] = []
+    for record in records:
+        clex = record.get("clex")
+        if not isinstance(clex, Mapping):
+            continue
+        raw_prediction_set = clex.get("prediction_set")
+        if (
+            not isinstance(raw_prediction_set, Sequence)
+            or isinstance(raw_prediction_set, (str, bytes))
+            or not raw_prediction_set
+        ):
+            continue
+        prediction_set = {
+            str(option).strip().upper() for option in raw_prediction_set
+        }
+        golden = {
+            str(option).strip().upper()
+            for option in record.get("golden_answers", [])
+        }
+        clex_rows.append(
+            (prediction_set, golden, bool(clex.get("applied", False)))
+        )
+    web_search_rows = [
+        value
+        for record in records
+        if isinstance((value := record.get("web_search")), Mapping)
+        and value
+    ]
+    searched_rows = [
+        value for value in web_search_rows if bool(value.get("searched"))
+    ]
+    web_evidence = [
+        item
+        for value in searched_rows
+        for item in value.get("evidence", ())
+        if isinstance(item, Mapping)
+    ]
+    web_paired_rows: list[tuple[bool, bool]] = []
+    for record in records:
+        web_search = record.get("web_search")
+        blind_answer = record.get("b0_blind_answer")
+        if (
+            not isinstance(web_search, Mapping)
+            or not web_search.get("searched")
+            or not web_search.get("evidence_accepted")
+            or not isinstance(blind_answer, str)
+            or not blind_answer.strip()
+        ):
+            continue
+        golden = {
+            str(answer).strip().casefold()
+            for answer in record.get("golden_answers", [])
+        }
+        blind_correct = blind_answer.strip().casefold() in golden
+        web_paired_rows.append((blind_correct, correct(record)))
+    corrected_count = sum(
+        not blind_correct and final_correct
+        for blind_correct, final_correct in web_paired_rows
+    )
+    harmed_count = sum(
+        blind_correct and not final_correct
+        for blind_correct, final_correct in web_paired_rows
+    )
+    paired_count = len(web_paired_rows)
     return {
         "avg_acc": accuracy,
         "avg_em": accuracy,
@@ -706,6 +770,135 @@ def evaluate_result_records(
                 [outcome for _, outcome in risk_rows],
             )
         ),
+        "clex": {
+            "evaluated_samples": len(clex_rows),
+            "empirical_coverage": (
+                sum(
+                    bool(prediction_set & golden)
+                    for prediction_set, golden, _ in clex_rows
+                )
+                / len(clex_rows)
+                if clex_rows
+                else None
+            ),
+            "average_prediction_set_size": (
+                sum(len(prediction_set) for prediction_set, _, _ in clex_rows)
+                / len(clex_rows)
+                if clex_rows
+                else None
+            ),
+            "singleton_rate": (
+                sum(len(prediction_set) == 1 for prediction_set, _, _ in clex_rows)
+                / len(clex_rows)
+                if clex_rows
+                else None
+            ),
+            "application_rate": (
+                sum(applied for _, _, applied in clex_rows) / len(clex_rows)
+                if clex_rows
+                else None
+            ),
+            "correct_option_elimination_rate": (
+                sum(
+                    not bool(prediction_set & golden)
+                    for prediction_set, golden, _ in clex_rows
+                )
+                / len(clex_rows)
+                if clex_rows
+                else None
+            ),
+        },
+        "web_search": {
+            "evaluated_samples": len(web_search_rows),
+            "search_rate": (
+                len(searched_rows) / len(web_search_rows)
+                if web_search_rows
+                else None
+            ),
+            "fallback_rate": (
+                sum(bool(value.get("error")) for value in searched_rows)
+                / len(searched_rows)
+                if searched_rows
+                else None
+            ),
+            "average_searches": (
+                sum(int(value.get("search_count", 1)) for value in searched_rows)
+                / len(searched_rows)
+                if searched_rows
+                else None
+            ),
+            "empty_result_rate": (
+                sum(not bool(value.get("evidence")) for value in searched_rows)
+                / len(searched_rows)
+                if searched_rows
+                else None
+            ),
+            "evidence_acceptance_rate": (
+                sum(
+                    bool(
+                        value.get(
+                            "evidence_accepted",
+                            bool(value.get("evidence")),
+                        )
+                    )
+                    for value in searched_rows
+                )
+                / len(searched_rows)
+                if searched_rows
+                else None
+            ),
+            "answer_page_hit_rate": (
+                sum(bool(value.get("answer_page_hit")) for value in searched_rows)
+                / len(searched_rows)
+                if searched_rows
+                else None
+            ),
+            "official_source_rate": (
+                sum(item.get("source_tier") == "official" for item in web_evidence)
+                / len(web_evidence)
+                if web_evidence
+                else None
+            ),
+            "average_context_tokens": (
+                sum(
+                    int(value.get("estimated_context_tokens", 0))
+                    for value in searched_rows
+                )
+                / len(searched_rows)
+                if searched_rows
+                else None
+            ),
+            "average_results": (
+                sum(len(value.get("evidence", ())) for value in searched_rows)
+                / len(searched_rows)
+                if searched_rows
+                else None
+            ),
+            "paired_samples": paired_count,
+            "blind_accuracy": (
+                sum(blind for blind, _ in web_paired_rows) / paired_count
+                if paired_count
+                else None
+            ),
+            "final_accuracy": (
+                sum(final for _, final in web_paired_rows) / paired_count
+                if paired_count
+                else None
+            ),
+            "search_corrected_count": corrected_count,
+            "search_harmed_count": harmed_count,
+            "search_corrected_rate": (
+                corrected_count / paired_count if paired_count else None
+            ),
+            "search_harmed_rate": (
+                harmed_count / paired_count if paired_count else None
+            ),
+            "net_improvement_rate": (
+                (corrected_count - harmed_count) / paired_count
+                if paired_count
+                else None
+            ),
+        },
         "cost": summarize_usage(record.get("usage", {}) for record in records),
     }
 

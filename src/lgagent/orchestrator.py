@@ -15,6 +15,7 @@ class PipelineRoute:
     name: str
     oath_rag_enabled: bool
     cape_v_enabled: bool
+    legal_mcq_enabled: bool = False
 
     @property
     def corrected_baseline(self) -> bool:
@@ -30,6 +31,13 @@ class LegacyEntrypointSettings:
 
 
 def resolve_pipeline_route(config: LGAgentConfig | LGAgentPlusConfig) -> PipelineRoute:
+    if isinstance(config, LGAgentConfig) and config.legal_mcq.enabled:
+        return PipelineRoute(
+            name="legal-mcq-three-role",
+            oath_rag_enabled=False,
+            cape_v_enabled=False,
+            legal_mcq_enabled=True,
+        )
     plus = config.lgagent_plus if isinstance(config, LGAgentConfig) else config
     if not plus.enabled:
         return PipelineRoute(

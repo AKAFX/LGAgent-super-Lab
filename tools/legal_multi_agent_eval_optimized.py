@@ -336,6 +336,11 @@ def main() -> None:
     app_conf = load_lgagent_config(PARAM_PATH)
     gen_conf = app_conf.generation.as_legacy_dict()
     pipeline_route = resolve_pipeline_route(app_conf)
+    if pipeline_route.legal_mcq_enabled:
+        raise RuntimeError(
+            "This legacy evaluator cannot preserve the LegalMCQ oracle boundary. "
+            "Use tools/run_legal_mcq.py instead."
+        )
 
     entrypoint = resolve_legacy_entrypoint_settings(
         pipeline_route,

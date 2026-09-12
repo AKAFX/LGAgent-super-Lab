@@ -74,12 +74,15 @@ class EvidenceAuditConfig:
     authority_ceiling: int = 5
     retrieval_failure_mode: RetrievalFailureMode = RetrievalFailureMode.FAIL_CLOSED
     max_tokens: int = 2048
+    max_attempts: int = 3
 
     def __post_init__(self) -> None:
         if self.authority_ceiling <= 0:
             raise ValueError("authority_ceiling must be positive")
         if self.max_tokens <= 0:
             raise ValueError("max_tokens must be positive")
+        if self.max_attempts <= 0:
+            raise ValueError("max_attempts must be positive")
         if isinstance(self.retrieval_failure_mode, str):
             object.__setattr__(
                 self,
@@ -399,6 +402,17 @@ class EvidenceAuditor:
                 or not exact_span
                 or exact_span not in evidence.text
             ):
+                # #region debug-point C:exact-span-mismatch
+                try:
+                    import json as _debug_json
+                    import urllib.request as _debug_urlrequest
+                    with open(".dbg/joint-budget-failures.env", encoding="utf-8") as _debug_stream:
+                        _debug_url = next(line.split("=", 1)[1] for line in _debug_stream.read().splitlines() if line.startswith("DEBUG_SERVER_URL="))
+                    _debug_payload = _debug_json.dumps({"sessionId": "joint-budget-failures", "runId": "post-fix", "hypothesisId": "C", "location": "evidence_audit.py:_parse_response:exact_span", "msg": "[DEBUG] Evidence exact span mismatch", "data": {"evidence_id": evidence_id, "audit_index": index, "span_length": len(exact_span) if isinstance(exact_span, str) else None, "evidence_length": len(evidence.text), "stripped_match": isinstance(exact_span, str) and exact_span.strip() in evidence.text, "normalized_match": isinstance(exact_span, str) and " ".join(exact_span.split()) in " ".join(evidence.text.split())}}).encode("utf-8")
+                    _debug_urlrequest.urlopen(_debug_urlrequest.Request(_debug_url, data=_debug_payload, headers={"Content-Type": "application/json"}), timeout=0.2).read()
+                except Exception:
+                    pass
+                # #endregion
                 raise EvidenceAuditError(
                     f"audits[{index}].exact_span is not an exact evidence substring"
                 )
@@ -413,6 +427,17 @@ class EvidenceAuditor:
             )
         missing = set(candidates) - seen
         if missing:
+            # #region debug-point C:omitted-evidence
+            try:
+                import json as _debug_json
+                import urllib.request as _debug_urlrequest
+                with open(".dbg/joint-budget-failures.env", encoding="utf-8") as _debug_stream:
+                    _debug_url = next(line.split("=", 1)[1] for line in _debug_stream.read().splitlines() if line.startswith("DEBUG_SERVER_URL="))
+                _debug_payload = _debug_json.dumps({"sessionId": "joint-budget-failures", "runId": "post-fix", "hypothesisId": "C", "location": "evidence_audit.py:_parse_response:missing", "msg": "[DEBUG] Evidence audit omitted IDs", "data": {"candidate_count": len(candidates), "seen_count": len(seen), "missing_count": len(missing), "response_length": len(text)}}).encode("utf-8")
+                _debug_urlrequest.urlopen(_debug_urlrequest.Request(_debug_url, data=_debug_payload, headers={"Content-Type": "application/json"}), timeout=0.2).read()
+            except Exception:
+                pass
+            # #endregion
             raise EvidenceAuditError(
                 f"audit output omitted evidence IDs: {sorted(missing)}"
             )
@@ -462,89 +487,123 @@ class EvidenceAuditor:
                     }
                     for evidence_id, (evidence, lanes) in valid.items()
                 ]
-                request = ModelRequest(
-                    model=self.model_config.model,
-                    messages=(
-                        ChatMessage("system", _AUDITOR_PROMPT),
-                        ChatMessage(
-                            "user",
-                            dumps_json(
-                                {
-                                    "option": option,
-                                    "claim": claim,
-                                    "evidence": evidence_payload,
-                                },
-                                indent=None,
-                            ),
+                messages = [
+                    ChatMessage("system", _AUDITOR_PROMPT),
+                    ChatMessage(
+                        "user",
+                        dumps_json(
+                            {
+                                "option": option,
+                                "claim": claim,
+                                "evidence": evidence_payload,
+                            },
+                            indent=None,
                         ),
                     ),
-                    temperature=0.0,
-                    top_p=1.0,
-                    max_tokens=min(
-                        self.model_config.max_tokens,
-                        self.config.max_tokens,
-                    ),
-                    metadata={"agent": "evidence_auditor", "option": option},
-                )
-                started_at = utc_now()
-                started = perf_counter()
-                response: ModelResponse | None = None
-                error: BaseException | None = None
-                try:
-                    response = self.model.complete(request)
-                except BaseException as exc:
-                    error = exc
-                if trace is not None:
-                    message = str(error) if error is not None else None
-                    if message and self.model_config.api_key:
-                        message = message.replace(
-                            self.model_config.api_key, "[REDACTED]"
-                        )
-                    trace.add_call(
-                        ModelCallTrace(
-                            call_id=uuid4().hex,
-                            agent="evidence_auditor",
-                            model=self.model_config.model,
-                            attempt=1,
-                            started_at=started_at,
-                            duration_ms=(perf_counter() - started) * 1000,
-                            usage=(
-                                response.usage
-                                if response
-                                else getattr(error, "usage", TokenUsage())
-                            ),
-                            request_id=response.request_id if response else None,
-                            seed_requested=(
-                                response.seed_requested
-                                if response
-                                else getattr(error, "diagnostics", {}).get(
-                                    "seed_requested"
-                                )
-                            ),
-                            provider_seed_guarantee=(
-                                response.provider_seed_guarantee
-                                if response
-                                else getattr(error, "diagnostics", {}).get(
-                                    "provider_seed_guarantee"
-                                )
-                            ),
-                            error_type=type(error).__name__ if error else None,
-                            error_message=message,
-                        )
+                ]
+                last_error: BaseException | None = None
+                for attempt in range(1, self.config.max_attempts + 1):
+                    request = ModelRequest(
+                        model=self.model_config.model,
+                        messages=tuple(messages),
+                        temperature=0.0,
+                        top_p=1.0,
+                        max_tokens=min(
+                            self.model_config.max_tokens,
+                            self.config.max_tokens,
+                        ),
+                        metadata={
+                            "agent": "evidence_auditor",
+                            "option": option,
+                            "attempt": attempt,
+                        },
                     )
-                    if error is not None:
-                        trace.add_error(
-                            "evidence_auditor", error, message=message or ""
+                    started_at = utc_now()
+                    started = perf_counter()
+                    response: ModelResponse | None = None
+                    error: BaseException | None = None
+                    parsed: tuple[AuditedEvidence, ...] | None = None
+                    try:
+                        response = self.model.complete(request)
+                        parsed = self._parse_response(response.content, valid)
+                    except BaseException as exc:
+                        error = exc
+                        last_error = exc
+                    if trace is not None:
+                        message = str(error) if error is not None else None
+                        if message and self.model_config.api_key:
+                            message = message.replace(
+                                self.model_config.api_key, "[REDACTED]"
+                            )
+                        trace.add_call(
+                            ModelCallTrace(
+                                call_id=uuid4().hex,
+                                agent="evidence_auditor",
+                                model=self.model_config.model,
+                                attempt=attempt,
+                                started_at=started_at,
+                                duration_ms=(perf_counter() - started) * 1000,
+                                usage=(
+                                    response.usage
+                                    if response
+                                    else getattr(error, "usage", TokenUsage())
+                                ),
+                                request_id=(
+                                    response.request_id if response else None
+                                ),
+                                seed_requested=(
+                                    response.seed_requested
+                                    if response
+                                    else getattr(error, "diagnostics", {}).get(
+                                        "seed_requested"
+                                    )
+                                ),
+                                provider_seed_guarantee=(
+                                    response.provider_seed_guarantee
+                                    if response
+                                    else getattr(error, "diagnostics", {}).get(
+                                        "provider_seed_guarantee"
+                                    )
+                                ),
+                                error_type=(
+                                    type(error).__name__ if error else None
+                                ),
+                                error_message=message,
+                            )
                         )
-                if error is not None:
+                        if error is not None:
+                            trace.add_error(
+                                "evidence_auditor",
+                                error,
+                                message=message or "",
+                            )
+                    if error is None:
+                        assert parsed is not None
+                        records.extend(parsed)
+                        break
                     if isinstance(error, BudgetExceededError):
                         error.diagnostics.setdefault(
                             "trace",
                             trace.as_dict() if trace is not None else {},
                         )
-                    raise error
-                assert response is not None
-                records.extend(self._parse_response(response.content, valid))
+                        raise error
+                    if attempt < self.config.max_attempts:
+                        if response is not None and response.content.strip():
+                            messages.append(
+                                ChatMessage("assistant", response.content.strip())
+                            )
+                        messages.append(
+                            ChatMessage(
+                                "user",
+                                "上一响应未通过严格证据审计："
+                                f"{error}。必须逐一返回输入中的每个 evidence_id，"
+                                "exact_span 必须逐字复制对应 evidence.text 的连续子串。"
+                                "请仅重新输出完整 JSON。",
+                            )
+                        )
+                else:
+                    assert last_error is not None
+                    raise last_error
             options[option] = build_option_evidence_audit(
                 records,
                 authority_ceiling=self.config.authority_ceiling,

@@ -143,6 +143,26 @@ class RobustnessCalibrationCostTest(unittest.TestCase):
                     "permutation_predictions": ["B", "B"],
                     "confidence": 0.8,
                     "risk_score": 0.2,
+                    "b0_blind_answer": "A",
+                    "b0_confidence": 0.6,
+                    "clex": {
+                        "prediction_set": ["B"],
+                        "applied": True,
+                    },
+                    "web_search": {
+                        "searched": True,
+                        "error": None,
+                        "search_count": 2,
+                        "estimated_context_tokens": 120,
+                        "evidence_accepted": True,
+                        "answer_page_hit": False,
+                        "evidence": [
+                            {
+                                "evidence_id": "web:1",
+                                "source_tier": "official",
+                            }
+                        ],
+                    },
                     "usage": {"calls": 2, "total_tokens": 12},
                 }
             ]
@@ -153,7 +173,67 @@ class RobustnessCalibrationCostTest(unittest.TestCase):
         self.assertEqual(report["evidence"]["ndcg@1"], 1.0)
         self.assertEqual(report["evidence"]["ndcg@3"], 1.0)
         self.assertEqual(report["robustness"]["permutation_consistency"], 1.0)
+        self.assertEqual(report["clex"]["empirical_coverage"], 1.0)
+        self.assertEqual(report["clex"]["average_prediction_set_size"], 1.0)
+        self.assertEqual(report["clex"]["singleton_rate"], 1.0)
+        self.assertEqual(report["clex"]["application_rate"], 1.0)
+        self.assertEqual(report["clex"]["correct_option_elimination_rate"], 0.0)
+        self.assertEqual(report["web_search"]["search_rate"], 1.0)
+        self.assertEqual(report["web_search"]["fallback_rate"], 0.0)
+        self.assertEqual(report["web_search"]["average_searches"], 2.0)
+        self.assertEqual(report["web_search"]["empty_result_rate"], 0.0)
+        self.assertEqual(report["web_search"]["evidence_acceptance_rate"], 1.0)
+        self.assertEqual(report["web_search"]["answer_page_hit_rate"], 0.0)
+        self.assertEqual(report["web_search"]["official_source_rate"], 1.0)
+        self.assertEqual(report["web_search"]["average_context_tokens"], 120.0)
+        self.assertEqual(report["web_search"]["paired_samples"], 1)
+        self.assertEqual(report["web_search"]["blind_accuracy"], 0.0)
+        self.assertEqual(report["web_search"]["final_accuracy"], 1.0)
+        self.assertEqual(report["web_search"]["search_corrected_rate"], 1.0)
+        self.assertEqual(report["web_search"]["search_harmed_rate"], 0.0)
+        self.assertEqual(report["web_search"]["net_improvement_rate"], 1.0)
         self.assertEqual(report["cost"]["total_tokens"], 12)
+
+    def test_web_search_paired_metrics_count_corrections_and_harm(self) -> None:
+        report = evaluate_result_records(
+            [
+                {
+                    "prediction": "B",
+                    "b0_blind_answer": "A",
+                    "golden_answers": ["B"],
+                    "web_search": {
+                        "searched": True,
+                        "evidence_accepted": True,
+                    },
+                },
+                {
+                    "prediction": "A",
+                    "b0_blind_answer": "B",
+                    "golden_answers": ["B"],
+                    "web_search": {
+                        "searched": True,
+                        "evidence_accepted": True,
+                    },
+                },
+                {
+                    "prediction": "B",
+                    "b0_blind_answer": "B",
+                    "golden_answers": ["B"],
+                    "web_search": {
+                        "searched": True,
+                        "evidence_accepted": False,
+                    },
+                },
+            ]
+        )
+
+        metrics = report["web_search"]
+        self.assertEqual(metrics["paired_samples"], 2)
+        self.assertEqual(metrics["search_corrected_count"], 1)
+        self.assertEqual(metrics["search_harmed_count"], 1)
+        self.assertEqual(metrics["search_corrected_rate"], 0.5)
+        self.assertEqual(metrics["search_harmed_rate"], 0.5)
+        self.assertEqual(metrics["net_improvement_rate"], 0.0)
 
     def test_report_counts_missing_citations_as_zero(self) -> None:
         report = evaluate_result_records(

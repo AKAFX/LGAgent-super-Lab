@@ -1,0 +1,114 @@
+<meta charset="utf-8">
+<style>
+body { font-family: "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.65; margin: 44px; color: #202124; }
+h1 { font-size: 28px; text-align: center; margin-bottom: 8px; }
+h2 { font-size: 20px; border-bottom: 1px solid #b8bec6; padding-bottom: 5px; margin-top: 28px; }
+h3 { font-size: 16px; margin-top: 20px; }
+p, li, td, th { font-size: 11.5pt; }
+.subtitle { text-align: center; color: #555; margin-bottom: 28px; }
+.note { border-left: 4px solid #2b6cb0; padding: 8px 12px; background: #f3f6f9; }
+table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+th, td { border: 1px solid #aeb4bb; padding: 7px; vertical-align: top; }
+th { background: #edf1f4; }
+code { font-family: Menlo, monospace; font-size: 10pt; }
+pre { background: #f5f5f5; padding: 12px; white-space: pre-wrap; }
+</style>
+<h1>BOLT-Web 预算约束实时联网检索</h1>
+<p class="subtitle">LGAgent 扩展方案技术报告 v2.0 | 2026-09-02</p>
+
+<h2>摘要</h2>
+<p>BOLT-Web（Budgeted On-demand Legal Tool-use for Web Evidence）是一种面向小规模法律模型的训练无关推理时增强方法。它保留原始 LGAgent 的 Lawyer A、Judge、Lawyer B0 和 Lawyer B1 协议，在 Judge/B0 之后按需调用 Tavily Search，并在 B1 之前执行来源、相关性、决定性命题覆盖和跨域共识门控。方法最多执行两轮条件搜索，最终只注入最多三个证据片段，Web 上下文预算约 1,800 tokens。OATH-RAG、CAPE-V 和 C-LEX 在该实验分支中全部关闭，以单独测量实时联网检索的收益与成本。</p>
+<p class="note"><b>实验口径：</b>用户允许搜索命中公开题库答案，因此该方法属于 Open-Web/Open-Book 条件。答案页命中必须单列报告，不能与原论文闭卷 LGAgent 结果直接混同。</p>
+
+<h2>1. 研究问题与创新点</h2>
+<ol>
+<li><b>按需工具调用：</b>仅在知识可能过期或模型不确定时检索，避免固定 RAG 对全部题目引入噪声。</li>
+<li><b>两轮条件回退：</b>第一轮优先官方短查询；仅当没有可采纳证据时，第二轮才以去选项后的题干检索。</li>
+<li><b>决定性命题门控：</b>官方来源并不自动可信可用，网页必须覆盖 B0 所选选项对应的决定性法律命题。</li>
+<li><b>答案页双域共识：</b>页面需先匹配当前题干，再在其后出现明确答案标记；至少两个独立域名给出相同答案方可采纳。</li>
+<li><b>同次配对评估：</b>在同一模型执行中保存 B0 闭卷答案和最终答案，直接统计搜索改对、改错和净提升，消除跨运行随机性干扰。</li>
+</ol>
+
+<h2>2. 单题执行链</h2>
+<pre>Question
+  -> Lawyer A: 中立结构化分解
+  -> Judge: 检索需求与逐选项查询
+  -> Lawyer B0: 闭卷答案 + 置信度
+  -> 三信号触发门控
+       -> Round 1: 官方域名短查询
+       -> 证据不足时 Round 2: 去选项原题回退
+  -> 来源评分 + 命题覆盖 + 跨域共识
+  -> 最多 3 条 / 约 1,800 tokens
+  -> Lawyer B1: 按题干极性逐选项核验
+  -> Final answer + 全量审计记录</pre>
+
+<h2>3. 搜索触发条件</h2>
+<p>设时效信号为 <code>t</code>，Judge 检索判断为 <code>j</code>，B0 置信度为 <code>c</code>，基础阈值为 <code>tau=0.65</code>：</p>
+<pre>g(q) = 1[t = 1 OR c &lt; 0.65 OR (j = 1 AND c &lt; 0.80)]</pre>
+<p>时效信号包括“最新、现行、目前、截至、今日、今年、实时”及对应英文表达。高置信、无时效要求且 Judge 不要求检索的题目保持闭卷。</p>
+
+<h2>4. 两轮查询构造</h2>
+<h3>4.1 第一轮：官方短查询</h3>
+<p>查询由法域、Judge 全局查询、Lawyer A 问题焦点、B0 对应的 option query 和“法律依据 官方”组成。总长度不超过 240 字符，不拼入完整四个选项。Tavily 使用官方域名限制，优先覆盖 <code>gov.cn</code>、全国人大、法院、检察院和司法部来源。</p>
+<h3>4.2 第二轮：条件回退</h3>
+<p>若第一轮没有证据通过采纳门控，系统移除 A/B/C/D 选项，仅保留题干，并构造 <code>"题干" 法律依据 正确答案</code>。第二轮不限制官方域名，以补充专业站点和公开题库页面。任一轮已有合格证据时立即停止。</p>
+
+<h2>5. 来源评分与证据采纳</h2>
+<p>候选质量分数为：</p>
+<pre>quality = 0.45 * authority
+        + 0.30 * retrieval_score
+        + 0.15 * query_coverage
+        + 0.10 * decisive_claim_coverage</pre>
+<table>
+<tr><th>来源类型</th><th>规则</th><th>采纳条件</th></tr>
+<tr><td>官方</td><td><code>.gov.cn</code></td><td>质量分达到门槛，且决定性命题覆盖率不低于 0.12</td></tr>
+<tr><td>学术</td><td><code>.edu.cn</code></td><td>与其他独立来源互证，并覆盖决定性命题</td></tr>
+<tr><td>专业</td><td>域名含 law、legal、court、procuratorate</td><td>与其他独立来源互证，并覆盖决定性命题</td></tr>
+<tr><td>普通</td><td>其他 HTTPS 来源</td><td>至少两个独立域名通过质量与命题覆盖门槛</td></tr>
+<tr><td>题库答案页</td><td>匹配题干后出现“正确答案/参考答案/标准答案/答案 + A-D”</td><td>至少两个独立域名同答案；多答案共识冲突时全部拒绝</td></tr>
+</table>
+<p>若没有证据通过门控，系统不向 B1 注入 Web 文本。这样可以阻止“官方但不相关”的网页仅凭域名权威性改变闭卷答案。</p>
+
+<h2>6. 预算与搜索服务</h2>
+<table>
+<tr><th>项目</th><th>默认值</th></tr>
+<tr><td>搜索服务</td><td>Tavily Search REST API，basic depth</td></tr>
+<tr><td>最大搜索轮次</td><td>2；第二轮仅条件触发</td></tr>
+<tr><td>每轮候选</td><td>最多 5</td></tr>
+<tr><td>最终注入来源</td><td>最多 3</td></tr>
+<tr><td>每来源正文</td><td>最多 600 字符</td></tr>
+<tr><td>总 Web 上下文</td><td>约 1,800 tokens 硬上限</td></tr>
+<tr><td>搜索超时</td><td>15 秒</td></tr>
+<tr><td>供应商生成答案</td><td>关闭：<code>include_answer=false</code></td></tr>
+<tr><td>整页原文</td><td>关闭：<code>include_raw_content=false</code></td></tr>
+</table>
+
+<h2>7. B1 证据使用策略</h2>
+<p>网页内容被标记为不可信外部证据。B1 只能在证据直接支持或反驳决定性选项时改变闭卷答案；证据不足时保留 B0 或标记 NEI。提示明确要求遵守题干极性：对于“选择错误项”的问题，证明某选项成立意味着排除该选项，而不是选择它。</p>
+
+<h2>8. 审计与指标</h2>
+<p>每题记录触发原因、两轮查询、每轮候选数、错误、来源 URL、来源等级、质量分、决定性命题覆盖、直接答案、答案页命中、注入 token 估算和证据 SHA-256。同时保存 <code>b0_blind_answer</code>、<code>b0_confidence</code> 和最终答案。</p>
+<table>
+<tr><th>指标</th><th>定义</th></tr>
+<tr><td>Search Rate</td><td>触发搜索的样本比例</td></tr>
+<tr><td>Evidence Acceptance Rate</td><td>触发后至少有一条证据通过门控的比例</td></tr>
+<tr><td>Answer Page Hit Rate</td><td>被采纳证据中通过双域共识的答案页比例</td></tr>
+<tr><td>Search Corrected Rate</td><td>B0 错、最终对的已注入合格证据样本数 / 可配对证据增强样本数</td></tr>
+<tr><td>Search Harmed Rate</td><td>B0 对、最终错的已注入合格证据样本数 / 可配对证据增强样本数</td></tr>
+<tr><td>Net Improvement Rate</td><td>(改对数 - 改错数) / 可配对证据增强样本数；搜索触发但无证据注入的样本不用于归因</td></tr>
+</table>
+
+<h2>9. 实验协议</h2>
+<p>先在 LexGenius 固定 dev 子集进行 10 题单并发复测。只有在题库误命中消失、官方低覆盖网页被拒绝、Search Corrected Rate 不低于 Search Harmed Rate、失败率可接受后，才扩展到 560 题和三个固定种子 42、43、44。正式对照需保持同题、同模型 DeepSeek-V3、相同参数和相同 seed。阈值只在开发集选择，测试集冻结。API 的 seed 不保证严格确定性，因此搜索收益以同次 B0/Final 配对指标为主。</p>
+
+<h2>10. 局限与论文表述边界</h2>
+<ul>
+<li>搜索结果受索引、时间和排序变化影响；证据快照支持审计，但不能使搜索结果永久确定。</li>
+<li>词项覆盖率是低成本近似，不能替代完整法律蕴含模型。</li>
+<li>两个题库域名可能复制同一上游内容，因此“双域共识”降低风险但不等于事实独立。</li>
+<li>Open-Web 命中公开答案与闭卷法律推理不是同一实验条件，论文必须分表或显著标注。</li>
+<li>在完成完整对照和统计检验前，只能称为工程创新与待验证方法，不能宣称显著提升。</li>
+</ul>
+
+<h2>11. 当前实现位置</h2>
+<p><code>src/lgagent/web_search.py</code> 实现门控、两轮查询、评分、共识、预算与审计；<code>src/lgagent/domain.py</code> 在 B0 与 B1 之间接入；<code>src/lgagent/experiment_runner.py</code> 保存 B0 和 Web 诊断；<code>src/lgagent/evaluation.py</code> 计算搜索成本与同次配对收益；配置位于 <code>examples/parameter/legal2_rag_parameter.yaml</code>。</p>

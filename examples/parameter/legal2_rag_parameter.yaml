@@ -29,7 +29,7 @@ generation:
       model_name_or_path: openbmb/MiniCPM4-8B
       trust_remote_code: true
     openai:
-    api_key: "${OPENAI_API_KEY}"
+      api_key: ''  # 如果使用API key池，这里可以为空；否则请填入你的API key
       base_delay: 1.0
       base_url: https://api.zhizengzeng.com/v1  # 智增增API地址，可根据实际情况修改
       concurrency: 8
@@ -48,11 +48,81 @@ generation:
     temperature: 0.7
     top_p: 0.8
   system_prompt: ''
+legal_mcq:
+  # Rollback switch: false preserves the existing LGAgent/LGAgent++ route.
+  enabled: false
+  mode: closed_book
+  seed: 42
+  max_attempts: 2
+  max_revision_rounds: 1
+  # Normal=3, primary timeout+fallback=4, revision=5, revision fallback=6.
+  max_model_calls: 7
+  max_total_tokens: 65536
+  max_wall_time_seconds: 360
+  model_call_timeout_seconds: 60
+  controller_call_timeout_seconds: 30
+  solver_call_timeout_seconds: 120
+  solver_fallback_timeout_seconds: 90
+  verifier_call_timeout_seconds: 45
+  solver_timeout_retries: 0
+  solver_timeout_circuit_breaker: 2
+  controller_structured_output_mode: auto
+  solver_structured_output_mode: auto
+  verifier_structured_output_mode: auto
+  solver_visible_output_tokens: 2048
+  solver_reasoning_allowance_tokens: 6144
+  verifier_visible_output_tokens: 384
+  verifier_length_retry_tokens: 512
+  auxiliary_reasoning_reserve_tokens: 2048
+  skip_verifier_on_deterministic_errors: true
+  min_authority_level: 4
+  prompt_version: legal-mcq-three-role-v5
+  # The controller and verifier can use economical models. The solver should
+  # use the strongest available model. All three may share one compatible API.
+  # Remove reasoning_effort or use provider_default to restore provider behavior.
+  controller_model:
+    backend: openai
+    base_url: https://api.commandcode.ai/provider/v1
+    api_key: ''
+    model_name: Qwen/Qwen3.7-Flash
+    temperature: 0
+    top_p: 1
+    max_tokens: 1200
+    reasoning_effort: low
+  solver_model:
+    backend: openai
+    base_url: https://api.commandcode.ai/provider/v1
+    api_key: ''
+    model_name: gpt-5.6-sol
+    temperature: 0.1
+    top_p: 1
+    # Total cap; the normal request starts at 8192 including reasoning.
+    max_tokens: 12288
+    reasoning_effort: high
+  # One bounded call after a primary Solver timeout; no same-model timeout retry.
+  solver_fallback_model:
+    backend: openai
+    base_url: https://api.commandcode.ai/provider/v1
+    api_key: ''
+    model_name: Qwen/Qwen3.8-Max-0902
+    temperature: 0
+    top_p: 1
+    max_tokens: 8192
+    reasoning_effort: medium
+  verifier_model:
+    backend: openai
+    base_url: https://api.commandcode.ai/provider/v1
+    api_key: ''
+    model_name: Qwen/Qwen3.7-Flash
+    temperature: 0
+    top_p: 1
+    max_tokens: 512
+    reasoning_effort: low
 lgagent_plus:
   enabled: false
   seed: 42
   oath_rag:
-    enabled: true
+    enabled: false
     corpus_path: data/oath/oath_just_laws_strict.jsonl
     corpus_failure_mode: fail_closed
     lexical_top_k: 20
@@ -62,7 +132,7 @@ lgagent_plus:
     require_temporal_match: true
     require_authoritative_source: true
   cape_v:
-    enabled: true
+    enabled: false
     initial_candidates: 1
     slow_path_candidates: 1
     permutation_count: 3
@@ -87,7 +157,7 @@ lgagent_plus:
     verifier_model:
       backend: openai
       base_url: https://api.zhizengzeng.com/v1
-    api_key: "${OPENAI_API_KEY}"
+      api_key: ''
       model_name: deepseek-v3
       temperature: 0.0
       top_p: 1.0
@@ -104,8 +174,30 @@ lgagent_plus:
       low_top2_margin: 1.0
     max_rounds: 2
     max_model_calls: 32
-    max_total_tokens: 32768
-    max_wall_time_seconds: 120
+    max_total_tokens: 196608
+    max_wall_time_seconds: 300
+  clex:
+    enabled: false
+    calibration_path: docs/clex_calibration.json
+    alpha: 0.10
+    min_calibration_size: 30
+    group_field: domain
+  web_search:
+    enabled: false
+    provider: tavily
+    base_url: https://api.tavily.com/search
+    api_key_env: TAVILY_API_KEY
+    confidence_threshold: 0.65
+    max_searches: 2
+    candidate_results: 5
+    max_results: 3
+    chunks_per_source: 1
+    max_query_chars: 240
+    max_context_tokens: 1800
+    max_chars_per_result: 600
+    min_relevance_score: 0.35
+    timeout_seconds: 15
+    failure_mode: closed_book
 prompt:
   template: prompt/qa_boxed_single_choice_simple.jinja
 retriever:
@@ -120,7 +212,7 @@ retriever:
       pooling_method: auto
       trust_remote_code: true
     openai:
-    api_key: "${OPENAI_API_KEY}"
+      api_key: ''
       base_url: https://api.openai.com/v1
       model_name: text-embedding-3-small
     sentence_transformers:

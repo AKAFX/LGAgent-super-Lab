@@ -182,7 +182,17 @@ class LawyerAOutput:
         }
         raw_case_date = data.get("case_date")
         case_date = None
-        if raw_case_date not in (None, ""):
+        null_date_aliases = {"", "null", "none", "n/a", "不适用", "未知", "无"}
+        normalized_case_date = (
+            raw_case_date.strip().lower()
+            if isinstance(raw_case_date, str)
+            else raw_case_date
+        )
+        is_null_date = raw_case_date is None or (
+            isinstance(normalized_case_date, str)
+            and normalized_case_date in null_date_aliases
+        )
+        if not is_null_date:
             case_date = _string(raw_case_date, "case_date")
             try:
                 date.fromisoformat(case_date)

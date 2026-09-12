@@ -74,13 +74,14 @@ Buckets are fixed to train/dev/test = 8000/1000/1000. The experiment split is
 selected at runtime, and the runner rejects changed data or configuration.
 Seeds are 42, 43, and 44. Paid execution follows the staged protocol below.
 
-The frozen matrix contains all 12 configurations from `build_task14_matrix`:
-Original, OATH-only, CAPE-only, Joint, seven single-factor ablations, and the
-equal-token Self-Consistency control. Every LGAgent configuration is executed
-through `LGAgentPlusRunner`; Self-Consistency repeats its corrected-original
-route and uses deterministic majority voting. Failed samples remain in the
-result JSONL with an empty prediction and therefore remain in the accuracy
-denominator.
+The frozen matrix contains all 13 configurations from `build_task14_matrix`:
+Original, Budgeted Web Search, OATH-only, CAPE-only, Joint, seven single-factor
+ablations, and the equal-token Self-Consistency control. Budgeted Web Search is
+isolated from OATH-RAG, CAPE-V, and C-LEX. Every LGAgent configuration is
+executed through `LGAgentPlusRunner`; Self-Consistency repeats its
+corrected-original route and uses deterministic majority voting. Failed
+samples remain in the result JSONL with an empty prediction and therefore
+remain in the accuracy denominator.
 
 ### Staged protocol
 
@@ -89,10 +90,10 @@ Paid runs are deliberately staged. The CLI defaults to the recommended
 
 | Profile | Split | Per-dataset cap | Configurations | Seeds |
 | --- | --- | ---: | --- | --- |
-| `pilot` | dev | 20 | 4 main configurations | 42 |
-| `main` | test | 200 | 4 main configurations | 42, 43, 44 |
+| `pilot` | dev | 20 | 5 main configurations | 42 |
+| `main` | test | 200 | 5 main configurations | 42, 43, 44 |
 | `ablation` | dev | 100 | 7 single-factor ablations only | 42 |
-| `full` | test | none | complete 12-configuration matrix | 42, 43, 44 |
+| `full` | test | none | complete 13-configuration matrix | 42, 43, 44 |
 
 Run `pilot` first, inspect failures, usage, and provider billing, then run
 `main`; run `ablation` only after the main pipeline is stable. `full` preserves
@@ -106,10 +107,10 @@ Paid runs are deliberately staged. The CLI defaults to the recommended
 
 | Profile | Split | Per-dataset cap | Configurations | Seeds |
 | --- | --- | ---: | --- | --- |
-| `pilot` | dev | 20 | 4 main configurations | 42 |
-| `main` | test | 200 | 4 main configurations | 42, 43, 44 |
+| `pilot` | dev | 20 | 5 main configurations | 42 |
+| `main` | test | 200 | 5 main configurations | 42, 43, 44 |
 | `ablation` | dev | 100 | 7 single-factor ablations only | 42 |
-| `full` | test | none | complete 12-configuration matrix | 42, 43, 44 |
+| `full` | test | none | complete 13-configuration matrix | 42, 43, 44 |
 
 Run `pilot` first, inspect failures, usage, and provider billing, then run
 `main`; run `ablation` only after the main pipeline is stable. `full` preserves

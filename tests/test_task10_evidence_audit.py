@@ -208,10 +208,68 @@ class EvidenceAuditorOfflineTest(unittest.TestCase):
             with self.subTest(payload=payload):
                 model = FakeModel([json.dumps({"audits": [payload]})])
                 with self.assertRaises(EvidenceAuditError):
-                    EvidenceAuditor(model, CONFIG).audit(
+                    EvidenceAuditor(
+                        model,
+                        CONFIG,
+                        config=EvidenceAuditConfig(max_attempts=1),
+                    ).audit(
                         analysis(),
                         retrieved_matrix([item]),
                     )
+
+    def test_retries_strict_output_validation_failures(self) -> None:
+        item = evidence("provided-id", "only this exact source text is available")
+        model = FakeModel(
+            [
+                json.dumps({"audits": []}),
+                json.dumps(
+                    {
+                        "audits": [
+                            {
+                                "evidence_id": "provided-id",
+                                "label": "SUPPORT",
+                                "exact_span": "paraphrased source text",
+                            }
+                        ]
+                    }
+                ),
+                json.dumps(
+                    {
+                        "audits": [
+                            {
+                                "evidence_id": "provided-id",
+                                "label": "SUPPORT",
+                                "exact_span": "exact source text",
+                            }
+                        ]
+                    }
+                ),
+            ]
+        )
+        trace = RunTrace()
+
+        matrix = EvidenceAuditor(model, CONFIG).audit(
+            analysis(),
+            retrieved_matrix([item]),
+            trace=trace,
+        )
+
+        self.assertEqual(
+            matrix.options["A"].support[0].evidence_id,
+            "provided-id",
+        )
+        self.assertEqual(len(model.requests), 3)
+        self.assertEqual(model.requests[1].metadata["attempt"], 2)
+        self.assertEqual(model.requests[2].metadata["attempt"], 3)
+        self.assertIn("omitted evidence IDs", model.requests[1].messages[-1].content)
+        self.assertIn(
+            "not an exact evidence substring",
+            model.requests[2].messages[-1].content,
+        )
+        self.assertEqual([call.attempt for call in trace.model_calls], [1, 2, 3])
+        self.assertEqual(trace.model_calls[0].error_type, "EvidenceAuditError")
+        self.assertEqual(trace.model_calls[1].error_type, "EvidenceAuditError")
+        self.assertIsNone(trace.model_calls[2].error_type)
 
     def test_missing_case_date_uses_injected_current_date(self) -> None:
         expired = evidence(
@@ -366,6 +424,54 @@ class LawyerB1ContextTest(unittest.TestCase):
             result.diagnostics["evidence_matrix"]["options"]["A"]["coverage"],
             1 / 3,
         )
+
+    def test_budgeted_web_provider_runs_after_b0_and_supplies_b1_context(self) -> None:
+        reasoning = FakeModel(
+            [json.dumps(lawyer_a_payload()), json.dumps(judge_payload())]
+        )
+        evaluation = FakeModel(
+            [
+                '{"initial_answer":"A","confidence":0.4}',
+                json.dumps(b1_payload()),
+            ]
+        )
+        observed: dict[str, object] = {}
+
+        def provider(question, analysis_value, judge, b0, trace):
+            observed.update(
+                question=question,
+                domain=analysis_value.legal_domain,
+                query=judge.global_query,
+                confidence=b0.confidence,
+            )
+            trace.add_route("web-search", "fixture")
+            return (
+                [
+                    "[UNTRUSTED WEB EVIDENCE]\n"
+                    "evidence_id: web:1\n"
+                    "url: https://example.invalid/law\n"
+                    "content: current legal rule"
+                ],
+                {
+                    "searched": True,
+                    "estimated_context_tokens": 30,
+                },
+            )
+
+        result = run_single_question(
+            "Question A B C D",
+            reasoning_model=reasoning,
+            evaluation_model=evaluation,
+            reasoning_config=CONFIG,
+            evaluation_config=CONFIG,
+            retrieved_docs_provider=provider,
+            max_dialogue_rounds=0,
+        )
+
+        self.assertEqual(observed["confidence"], 0.4)
+        self.assertEqual(observed["query"], "query")
+        self.assertIn("web:1", evaluation.requests[1].messages[-1].content)
+        self.assertTrue(result.diagnostics["web_search"]["searched"])
 
 
 if __name__ == "__main__":

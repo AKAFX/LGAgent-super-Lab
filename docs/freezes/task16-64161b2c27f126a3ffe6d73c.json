@@ -1,0 +1,187 @@
+{
+  "config": {
+    "path": "examples/parameter/legal2_rag_parameter.yaml",
+    "sha256": "533aaa5626b1e86e0db045329b406f5d76d865dc4891babb8326cb4371f2ecb1"
+  },
+  "freeze_id": "64161b2c27f126a3ffe6d73c",
+  "primary_datasets": {
+    "data/CAIL2022.jsonl": {
+      "samples": 300,
+      "sha256": "0702750e6995100854105d5fa6a2da08459f91564013f54ac53f87807ff8a96e",
+      "split_counts": {
+        "dev": 31,
+        "test": 39,
+        "train": 230
+      },
+      "split_membership_sha256": {
+        "dev": "ed006eeec31d5b982c535d668c63865875ec3035d6ab0e9700bede9b11e50e6b",
+        "test": "0fee8029a31ea7792cfc654791cad272ff9d5590fccdc7522e7e74c16b16ae26",
+        "train": "6e46aaf4ad49605fede69847a5c9d7de66485f8a17645ce4e7286abc20e359d2"
+      }
+    },
+    "data/LexGenius.jsonl": {
+      "samples": 560,
+      "sha256": "9033614d7115e1f3054c99dbcbe7295e06f35b5a3256fca3f9952741eea67d1e",
+      "split_counts": {
+        "dev": 53,
+        "test": 65,
+        "train": 442
+      },
+      "split_membership_sha256": {
+        "dev": "6db53044bd7b7b3c20c873978c67aa698960a50739fb1a6006fe02f5d3446e8c",
+        "test": "aed316bfa022a957ccbb82b34da2f436c8d64ed8ae661c4cf0ab78b40772196e",
+        "train": "ab51fb80e2a68015debea04ff532968473e1e306d45bc2f250b1473e930bedfe"
+      }
+    },
+    "data/lawbench_merged.jsonl": {
+      "samples": 9989,
+      "sha256": "2e87b4034f04ad490404d001523258104e43ca49de564a68c8ff033f9655d268",
+      "split_counts": {
+        "dev": 1007,
+        "test": 992,
+        "train": 7990
+      },
+      "split_membership_sha256": {
+        "dev": "bad6b117c740b517c7f50e00fbcd60e37f089750a3ee8e20b924640aefe1c8f3",
+        "test": "560f24282188f432335f2dc00aebd3e25e24c41b0df2fbe96b8e5634ca900ec5",
+        "train": "9265832f8e00ebc8e37626dd595b3e6d08b4169268174425234dfcdd1c8cee9d"
+      }
+    }
+  },
+  "runs": {
+    "model": {
+      "backend": "openai",
+      "max_tokens": 2048,
+      "model_id": "deepseek-v3",
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "verifier_model_id": "deepseek-v3"
+    },
+    "prompt_source_sha256": {
+      "src/lgagent/cape_v.py": "233abc4846dc438dde0860ad6ce91f6ab6f5299f95af143146982621a4cdd8c8",
+      "src/lgagent/clex.py": "fd341e1188a585e7672c41e0bc8c58ce1d364e82a1280d5d3ed1a66828098147",
+      "src/lgagent/config.py": "2fc6e67d9518e723bd8a66a91d7e1e725b117ca05171dbf2a20155f7ce18e4e2",
+      "src/lgagent/counterfactual.py": "b7c4293b0c924da8a53da1858be8334f1dda8e5d5ece65779b99b16eabed7cb9",
+      "src/lgagent/domain.py": "c6a80ae17f8f1e8b4e11282e2b7d33794a0d251abec4b49b3683c097e6d3e5d2",
+      "src/lgagent/evidence_audit.py": "851e0e9c19ff20ac40b59867789bdbd57eff036dfef2c5a920bdc82fe39fd273",
+      "src/lgagent/experiment_runner.py": "d430b303b3acf89187a7bbdd6654c3046a5cd4c67992ab8c6cd842f536a2ad1f",
+      "src/lgagent/legal_mcq/__init__.py": "497b8a01146abb837c2fd6eda03d4e4a922c3293385dc00dce6761f623471491",
+      "src/lgagent/legal_mcq/adapter.py": "4de7268d9b1cecf85a47c0b1491e1866d7b13803c5b3e8083bef678af3c4775d",
+      "src/lgagent/legal_mcq/agent.py": "2c4bf3fbd481558cb071d45d20d67558672ff5747724bcd2bf968101b7dec38e",
+      "src/lgagent/legal_mcq/clients.py": "4322a92288f5e1e6db8a55c267f8d58780ce81eb76b4da74223d16e69797f96c",
+      "src/lgagent/legal_mcq/decision.py": "5d090158de1cc50596e6c2a86a5504ba043e4bcaf3fac096d9ecae07bb71b392",
+      "src/lgagent/legal_mcq/evaluation.py": "13afe3be0373fb9c43afc7bf07c2c22e54495c0b12de38d596fcc381fb7fc966",
+      "src/lgagent/legal_mcq/evidence.py": "0a693502e0fe8fe9c65bccf437eae8958f62c3ff54faa42015d1bb4f9071a945",
+      "src/lgagent/legal_mcq/models.py": "fdc8318f5789684f4b4c7518629ce436c868aa90f137b90a44f09227c66efac9",
+      "src/lgagent/legal_mcq/observability.py": "b2f4df09232ad7614ddc8a99fa5e2ece1e0b01849c70fe36c81050e5d78de217",
+      "src/lgagent/legal_mcq/parser.py": "148b698c06e4e269b41531813d26cec9e368238eacb147ac4b31c97eea1d032f",
+      "src/lgagent/legal_mcq/skill_specs/legal-evaluation.yaml": "e4e4470f311f58e3f15fed8668fe9f84b3575abe461b8aaa216a24ce7a79bddd",
+      "src/lgagent/legal_mcq/skill_specs/legal-mcq-core.yaml": "5bb31d8f0a62a7758e6d2c50ee29e396052e83fe461bb8d373c07ed5a5721f56",
+      "src/lgagent/legal_mcq/skill_specs/legal-research.yaml": "921afdc2df2c3f684b17347ac37cbd4e26ac8e63fda82bce3589b3a316f03edf",
+      "src/lgagent/legal_mcq/skills.py": "437b5288f733c891a44f9c0b95f83593a663a9685741efb774bdb39fd8cb8bae",
+      "src/lgagent/model.py": "0bb3f510f94b7bb48b2bdafbbf5aa352b3b20ad7242fcb7416eb9d6555680d76",
+      "src/lgagent/oath_rag.py": "11f2f22a15d2eedc3e7b44eea518c09f731f69386bac770dbb7231766a1f9b3e",
+      "src/lgagent/protocol.py": "a7f089beaa52d2662b4dd20cfdb99f736a4269051a2e0fb58c374f7ab116367a",
+      "src/lgagent/risk.py": "3d781e2964999077730ffe777cac4823ee56d5f9ce794cb7b4c54a94d00ac25b",
+      "src/lgagent/runner.py": "7823a12637424fa0297f6c12b93f911398986be9c88f9a5818ec91f6414e09dd",
+      "src/lgagent/trace.py": "f3ebbd945cff7668f57bcfdbc2f0325d4546ebdca19fe2d4d85c3b833688290e",
+      "src/lgagent/verification.py": "5cd2c4906bca78c3c0294c8e2c88c91cc7e8518dda0079140b2e0d5a12246b62",
+      "src/lgagent/web_search.py": "7d2c7ee13c4e6d53bc12f53536bdec53b1038b9fc54b300ba20e4377eb084fc6",
+      "tools/run_legal_mcq.py": "83003b3bc2c6fc247b457be60376c4d79debb34f3a7672bdaf3692212b6ee965"
+    },
+    "prompt_version": "lgagent-plus-structured-prompts-v1",
+    "repeats": 3,
+    "seeds": [
+      42,
+      43,
+      44
+    ]
+  },
+  "schema_version": 1,
+  "split": {
+    "algorithm": "sha256(seed:dataset_sha256:sample_id)-mod-10000-v1",
+    "materialization": "indices are derived at runtime; datasets are not copied",
+    "ratios_per_10000": {
+      "dev": 1000,
+      "test": 1000,
+      "train": 8000
+    },
+    "seed": 20260826
+  },
+  "staged_protocol": {
+    "default_profile": "pilot",
+    "full_requires_explicit_profile": true,
+    "profiles": {
+      "ablation": {
+        "experiment_keys": [
+          "no-refute",
+          "no-exception",
+          "no-temporal",
+          "no-graph-expansion",
+          "no-permutation",
+          "single-verifier",
+          "fixed-budget"
+        ],
+        "max_examples_per_dataset": 100,
+        "seeds": [
+          42
+        ],
+        "split": "dev"
+      },
+      "full": {
+        "experiment_keys": [
+          "original",
+          "web-search",
+          "oath-only",
+          "cape-only",
+          "joint",
+          "no-refute",
+          "no-exception",
+          "no-temporal",
+          "no-graph-expansion",
+          "no-permutation",
+          "single-verifier",
+          "fixed-budget",
+          "self-consistency-equal-token"
+        ],
+        "max_examples_per_dataset": null,
+        "seeds": [
+          42,
+          43,
+          44
+        ],
+        "split": "test"
+      },
+      "main": {
+        "experiment_keys": [
+          "original",
+          "web-search",
+          "oath-only",
+          "cape-only",
+          "joint"
+        ],
+        "max_examples_per_dataset": 200,
+        "seeds": [
+          42,
+          43,
+          44
+        ],
+        "split": "test"
+      },
+      "pilot": {
+        "experiment_keys": [
+          "original",
+          "web-search",
+          "oath-only",
+          "cape-only",
+          "joint"
+        ],
+        "max_examples_per_dataset": 20,
+        "seeds": [
+          42
+        ],
+        "split": "dev"
+      }
+    }
+  }
+}

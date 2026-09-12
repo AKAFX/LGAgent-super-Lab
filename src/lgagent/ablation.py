@@ -14,6 +14,7 @@ from .evaluation import stable_hash
 EVIDENCE_LANES = ("support", "refute", "exception")
 REQUIRED_EXPERIMENT_KEYS = (
     "original",
+    "web-search",
     "oath-only",
     "cape-only",
     "joint",
@@ -40,6 +41,7 @@ class AblationExperiment:
     description: str
     strategy: str
     lgagent_plus_enabled: bool
+    web_search_enabled: bool
     oath_rag_enabled: bool
     cape_v_enabled: bool
     evidence_lanes: tuple[str, ...]
@@ -99,6 +101,7 @@ def build_task14_matrix(config: LGAgentConfig) -> tuple[AblationExperiment, ...]
     shared = {
         "strategy": "lgagent",
         "lgagent_plus_enabled": True,
+        "web_search_enabled": False,
         "oath_rag_enabled": True,
         "cape_v_enabled": True,
         "evidence_lanes": EVIDENCE_LANES,
@@ -119,6 +122,21 @@ def build_task14_matrix(config: LGAgentConfig) -> tuple[AblationExperiment, ...]
             description="Corrected original LGAgent without OATH-RAG or CAPE-V.",
             base=shared,
             lgagent_plus_enabled=False,
+            oath_rag_enabled=False,
+            cape_v_enabled=False,
+            evidence_lanes=(),
+            permutation_count=0,
+            enabled_verifiers=(),
+        ),
+        _experiment(
+            key="web-search",
+            label="Budgeted Web Search",
+            family="main",
+            description=(
+                "Corrected original LGAgent with gated real-time web evidence."
+            ),
+            base=shared,
+            web_search_enabled=True,
             oath_rag_enabled=False,
             cape_v_enabled=False,
             evidence_lanes=(),
@@ -267,6 +285,12 @@ def validate_task14_matrix(experiments: Sequence[AblationExperiment]) -> None:
             raise AblationMatrixError(
                 f"{item.key} cannot use verifiers with CAPE-V disabled"
             )
+        if item.web_search_enabled and (
+            item.oath_rag_enabled or item.cape_v_enabled
+        ):
+            raise AblationMatrixError(
+                f"{item.key} cannot combine web search with OATH-RAG or CAPE-V"
+            )
         integer_limits = {
             "graph_hops": (item.graph_hops, 0),
             "permutation_count": (item.permutation_count, 0),
@@ -304,9 +328,21 @@ def validate_task14_matrix(experiments: Sequence[AblationExperiment]) -> None:
         raise AblationMatrixError("joint must include permutation probes")
     if set(joint.enabled_verifiers) != set(VERIFIER_NAMES):
         raise AblationMatrixError("joint must enable every verifier")
+    web_search = by_key["web-search"]
+    if not web_search.web_search_enabled:
+        raise AblationMatrixError("web-search must enable budgeted web retrieval")
+    if any(
+        item.web_search_enabled
+        for key, item in by_key.items()
+        if key != "web-search"
+    ):
+        raise AblationMatrixError(
+            "budgeted web retrieval must remain isolated to web-search"
+        )
 
     expected_main = {
         "original": (False, False, False),
+        "web-search": (True, False, False),
         "oath-only": (True, True, False),
         "cape-only": (True, False, True),
         "joint": (True, True, True),
@@ -339,6 +375,7 @@ def validate_task14_matrix(experiments: Sequence[AblationExperiment]) -> None:
     behavior_fields = (
         "strategy",
         "lgagent_plus_enabled",
+        "web_search_enabled",
         "oath_rag_enabled",
         "cape_v_enabled",
         "evidence_lanes",
@@ -430,6 +467,7 @@ def export_task14_matrix(
         "family",
         "strategy",
         "lgagent_plus_enabled",
+        "web_search_enabled",
         "oath_rag_enabled",
         "cape_v_enabled",
         "evidence_lanes",

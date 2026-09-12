@@ -100,6 +100,7 @@ class ModelConfig:
     temperature: float = 0.7
     top_p: float = 0.8
     max_tokens: int = 2048
+    reasoning_effort: str | None = None
     api_key_source: str = "environment"
 
     @classmethod
@@ -116,6 +117,31 @@ class ModelConfig:
             raise ConfigurationError("temperature must be between 0 and 2")
         if not 0.0 <= top_p <= 1.0:
             raise ConfigurationError("top_p must be between 0 and 1")
+        raw_reasoning_effort = value.get("reasoning_effort")
+        reasoning_effort = (
+            raw_reasoning_effort.strip().lower()
+            if isinstance(raw_reasoning_effort, str)
+            else None
+        )
+        if raw_reasoning_effort is not None and not isinstance(
+            raw_reasoning_effort, str
+        ):
+            raise ConfigurationError("reasoning_effort must be a string")
+        if reasoning_effort in {"", "provider_default"}:
+            reasoning_effort = None
+        if reasoning_effort not in {
+            None,
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        }:
+            raise ConfigurationError(
+                "reasoning_effort must be provider_default, minimal, low, "
+                "medium, high, xhigh, or max"
+            )
         return cls(
             backend=str(value.get("backend", "openai")),
             base_url=str(value.get("base_url", "https://api.zhizengzeng.com/v1")),
@@ -124,6 +150,7 @@ class ModelConfig:
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
             api_key_source=str(value.get("api_key_source", "environment")),
         )
 
@@ -137,6 +164,7 @@ class ModelConfig:
             "temperature": self.temperature,
             "top_p": self.top_p,
             "max_tokens": self.max_tokens,
+            "reasoning_effort": self.reasoning_effort,
         }
 
 
@@ -151,6 +179,7 @@ class OathRagSettings:
     require_temporal_match: bool = True
     require_authoritative_source: bool = True
     corpus_failure_mode: str = "fail_closed"
+    default_jurisdiction: str = "CN"
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "OathRagSettings":
@@ -161,7 +190,7 @@ class OathRagSettings:
                 "enabled", "corpus_path", "lexical_top_k", "dense_top_k",
                 "final_top_k_per_lane", "graph_hops",
                 "require_temporal_match", "require_authoritative_source",
-                "corpus_failure_mode",
+                "corpus_failure_mode", "default_jurisdiction",
             },
             prefix,
         )
@@ -175,6 +204,14 @@ class OathRagSettings:
         ):
             raise ConfigurationError(
                 f"{prefix}.corpus_failure_mode must be fail_closed or empty_evidence"
+            )
+        default_jurisdiction = value.get("default_jurisdiction", "CN")
+        if (
+            not isinstance(default_jurisdiction, str)
+            or not default_jurisdiction.strip()
+        ):
+            raise ConfigurationError(
+                f"{prefix}.default_jurisdiction must be a non-empty string"
             )
         return cls(
             enabled=_boolean(value.get("enabled", False), f"{prefix}.enabled"),
@@ -202,6 +239,7 @@ class OathRagSettings:
                 f"{prefix}.require_authoritative_source",
             ),
             corpus_failure_mode=corpus_failure_mode,
+            default_jurisdiction=default_jurisdiction.strip(),
         )
 
 
@@ -419,12 +457,198 @@ class RiskSettings:
 
 
 @dataclass(frozen=True)
+class ClexSettings:
+    enabled: bool = False
+    calibration_path: str = ""
+    alpha: float = 0.1
+    min_calibration_size: int = 30
+    group_field: str = "domain"
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ClexSettings":
+        prefix = "lgagent_plus.clex"
+        _reject_unknown(
+            value,
+            {
+                "enabled",
+                "calibration_path",
+                "alpha",
+                "min_calibration_size",
+                "group_field",
+            },
+            prefix,
+        )
+        enabled = _boolean(value.get("enabled", False), f"{prefix}.enabled")
+        calibration_path = value.get("calibration_path", "")
+        if not isinstance(calibration_path, str):
+            raise ConfigurationError(f"{prefix}.calibration_path must be a string")
+        if enabled and not calibration_path.strip():
+            raise ConfigurationError(
+                f"{prefix}.calibration_path is required when C-LEX is enabled"
+            )
+        alpha = _number(value.get("alpha", 0.1), f"{prefix}.alpha", 0.0, 1.0)
+        if alpha in {0.0, 1.0}:
+            raise ConfigurationError(f"{prefix}.alpha must be strictly between 0 and 1")
+        group_field = value.get("group_field", "domain")
+        if not isinstance(group_field, str) or not group_field.strip():
+            raise ConfigurationError(
+                f"{prefix}.group_field must be a non-empty string"
+            )
+        return cls(
+            enabled=enabled,
+            calibration_path=calibration_path.strip(),
+            alpha=alpha,
+            min_calibration_size=_integer(
+                value.get("min_calibration_size", 30),
+                f"{prefix}.min_calibration_size",
+                1,
+            ),
+            group_field=group_field.strip(),
+        )
+
+
+@dataclass(frozen=True)
+class WebSearchSettings:
+    enabled: bool = False
+    provider: str = "tavily"
+    base_url: str = "https://api.tavily.com/search"
+    api_key_env: str = "TAVILY_API_KEY"
+    confidence_threshold: float = 0.65
+    max_searches: int = 2
+    candidate_results: int = 5
+    max_results: int = 3
+    chunks_per_source: int = 1
+    max_query_chars: int = 240
+    max_context_tokens: int = 1800
+    max_chars_per_result: int = 600
+    min_relevance_score: float = 0.35
+    timeout_seconds: float = 15.0
+    failure_mode: str = "closed_book"
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "WebSearchSettings":
+        prefix = "lgagent_plus.web_search"
+        _reject_unknown(
+            value,
+            {
+                "enabled",
+                "provider",
+                "base_url",
+                "api_key_env",
+                "confidence_threshold",
+                "max_searches",
+                "candidate_results",
+                "max_results",
+                "chunks_per_source",
+                "max_query_chars",
+                "max_context_tokens",
+                "max_chars_per_result",
+                "min_relevance_score",
+                "timeout_seconds",
+                "failure_mode",
+            },
+            prefix,
+        )
+        provider = str(value.get("provider", "tavily")).strip().lower()
+        if provider != "tavily":
+            raise ConfigurationError(f"{prefix}.provider must be tavily")
+        base_url = str(
+            value.get("base_url", "https://api.tavily.com/search")
+        ).strip()
+        if not base_url.startswith("https://"):
+            raise ConfigurationError(f"{prefix}.base_url must use https")
+        api_key_env = str(value.get("api_key_env", "TAVILY_API_KEY")).strip()
+        if not api_key_env:
+            raise ConfigurationError(f"{prefix}.api_key_env cannot be empty")
+        failure_mode = str(value.get("failure_mode", "closed_book")).strip()
+        if failure_mode not in {"closed_book", "fail_closed"}:
+            raise ConfigurationError(
+                f"{prefix}.failure_mode must be closed_book or fail_closed"
+            )
+        config = cls(
+            enabled=_boolean(value.get("enabled", False), f"{prefix}.enabled"),
+            provider=provider,
+            base_url=base_url,
+            api_key_env=api_key_env,
+            confidence_threshold=_number(
+                value.get("confidence_threshold", 0.65),
+                f"{prefix}.confidence_threshold",
+                0.0,
+                1.0,
+            ),
+            max_searches=_integer(
+                value.get("max_searches", 2),
+                f"{prefix}.max_searches",
+                1,
+                2,
+            ),
+            candidate_results=_integer(
+                value.get("candidate_results", 5),
+                f"{prefix}.candidate_results",
+                1,
+                10,
+            ),
+            max_results=_integer(
+                value.get("max_results", 3),
+                f"{prefix}.max_results",
+                1,
+                10,
+            ),
+            chunks_per_source=_integer(
+                value.get("chunks_per_source", 1),
+                f"{prefix}.chunks_per_source",
+                1,
+                3,
+            ),
+            max_query_chars=_integer(
+                value.get("max_query_chars", 240),
+                f"{prefix}.max_query_chars",
+                64,
+                800,
+            ),
+            max_context_tokens=_integer(
+                value.get("max_context_tokens", 1800),
+                f"{prefix}.max_context_tokens",
+                128,
+                8192,
+            ),
+            max_chars_per_result=_integer(
+                value.get("max_chars_per_result", 600),
+                f"{prefix}.max_chars_per_result",
+                64,
+                4000,
+            ),
+            min_relevance_score=_number(
+                value.get("min_relevance_score", 0.35),
+                f"{prefix}.min_relevance_score",
+                0.0,
+                1.0,
+            ),
+            timeout_seconds=_number(
+                value.get("timeout_seconds", 15.0),
+                f"{prefix}.timeout_seconds",
+                0.0,
+                120.0,
+                inclusive=False,
+            ),
+            failure_mode=failure_mode,
+        )
+        if config.candidate_results < config.max_results:
+            raise ConfigurationError(
+                f"{prefix}.candidate_results must be at least max_results"
+            )
+        return config
+
+
+@dataclass(frozen=True)
 class LGAgentPlusConfig:
     enabled: bool = False
     seed: int = 42
     oath_rag: OathRagSettings = field(default_factory=OathRagSettings)
     cape_v: CapeVSettings = field(default_factory=CapeVSettings)
     risk: RiskSettings = field(default_factory=RiskSettings)
+    clex: ClexSettings = field(default_factory=ClexSettings)
+    web_search: WebSearchSettings = field(default_factory=WebSearchSettings)
 
     @classmethod
     def from_mapping(
@@ -436,7 +660,17 @@ class LGAgentPlusConfig:
     ) -> "LGAgentPlusConfig":
         prefix = "lgagent_plus"
         _reject_unknown(
-            value, {"enabled", "seed", "oath_rag", "cape_v", "risk"}, prefix
+            value,
+            {
+                "enabled",
+                "seed",
+                "oath_rag",
+                "cape_v",
+                "risk",
+                "clex",
+                "web_search",
+            },
+            prefix,
         )
         config = cls(
             enabled=_boolean(value.get("enabled", False), f"{prefix}.enabled"),
@@ -452,7 +686,26 @@ class LGAgentPlusConfig:
             risk=RiskSettings.from_mapping(
                 _mapping(value.get("risk"), f"{prefix}.risk")
             ),
+            clex=ClexSettings.from_mapping(
+                _mapping(value.get("clex"), f"{prefix}.clex")
+            ),
+            web_search=WebSearchSettings.from_mapping(
+                _mapping(value.get("web_search"), f"{prefix}.web_search")
+            ),
         )
+        if config.clex.enabled and not config.cape_v.enabled:
+            raise ConfigurationError(
+                "lgagent_plus.clex requires lgagent_plus.cape_v.enabled=true"
+            )
+        if config.web_search.enabled and (
+            config.oath_rag.enabled
+            or config.cape_v.enabled
+            or config.clex.enabled
+        ):
+            raise ConfigurationError(
+                "lgagent_plus.web_search is an isolated experiment and requires "
+                "oath_rag, cape_v, and clex to be disabled"
+            )
         config._validate_budget(generation)
         return config
 
@@ -512,9 +765,393 @@ class LGAgentPlusConfig:
 
 
 @dataclass(frozen=True)
+class LegalMCQSettings:
+    """Opt-in three-role LegalMCQ workflow settings."""
+
+    enabled: bool = False
+    mode: str = "closed_book"
+    seed: int = 42
+    max_attempts: int = 2
+    max_revision_rounds: int = 1
+    max_model_calls: int = 7
+    max_total_tokens: int = 32768
+    max_wall_time_seconds: float = 180.0
+    model_call_timeout_seconds: float = 60.0
+    controller_call_timeout_seconds: float = 30.0
+    solver_call_timeout_seconds: float = 70.0
+    solver_fallback_timeout_seconds: float = 45.0
+    verifier_call_timeout_seconds: float = 30.0
+    solver_timeout_retries: int = 0
+    solver_timeout_circuit_breaker: int = 2
+    controller_structured_output_mode: str = "auto"
+    solver_structured_output_mode: str = "auto"
+    verifier_structured_output_mode: str = "auto"
+    solver_visible_output_tokens: int = 2048
+    solver_reasoning_allowance_tokens: int = 2048
+    verifier_visible_output_tokens: int = 384
+    verifier_length_retry_tokens: int = 512
+    auxiliary_reasoning_reserve_tokens: int = 1024
+    skip_verifier_on_deterministic_errors: bool = True
+    min_authority_level: int = 4
+    prompt_version: str = "legal-mcq-three-role-v5"
+    controller_model: ModelConfig | None = None
+    solver_model: ModelConfig | None = None
+    solver_fallback_model: ModelConfig | None = None
+    verifier_model: ModelConfig | None = None
+
+    @staticmethod
+    def _role_model(
+        value: Mapping[str, Any],
+        *,
+        role: str,
+        generation: ModelConfig,
+        environ: Mapping[str, str],
+        default_temperature: float,
+        default_max_tokens: int,
+    ) -> ModelConfig | None:
+        if not value:
+            return None
+        prefix = f"legal_mcq.{role}_model"
+        _reject_unknown(
+            value,
+            {
+                "backend",
+                "base_url",
+                "api_key",
+                "model_name",
+                "temperature",
+                "top_p",
+                "max_tokens",
+                "reasoning_effort",
+            },
+            prefix,
+        )
+        env_name = {
+            "controller": "LGAGENT_CONTROLLER_API_KEY",
+            "solver": "LGAGENT_SOLVER_API_KEY",
+            "solver_fallback": "LGAGENT_SOLVER_FALLBACK_API_KEY",
+            "verifier": "LGAGENT_LEGAL_VERIFIER_API_KEY",
+        }[role]
+        yaml_key = str(value.get("api_key") or "")
+        if yaml_key:
+            api_key, source = yaml_key, "yaml"
+        elif environ.get(env_name):
+            api_key, source = environ[env_name], "environment"
+        else:
+            api_key, source = generation.api_key, generation.api_key_source
+        return ModelConfig.from_mapping(
+            {
+                "backend": value.get("backend", generation.backend),
+                "base_url": value.get("base_url", generation.base_url),
+                "api_key": api_key,
+                "api_key_source": source,
+                "model": value.get("model_name", generation.model),
+                "temperature": value.get("temperature", default_temperature),
+                "top_p": value.get("top_p", 1.0),
+                "max_tokens": value.get("max_tokens", default_max_tokens),
+                "reasoning_effort": value.get(
+                    "reasoning_effort", generation.reasoning_effort
+                ),
+            }
+        )
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: Mapping[str, Any],
+        *,
+        generation: ModelConfig,
+        environ: Mapping[str, str],
+    ) -> "LegalMCQSettings":
+        prefix = "legal_mcq"
+        _reject_unknown(
+            value,
+            {
+                "enabled",
+                "mode",
+                "seed",
+                "max_attempts",
+                "max_revision_rounds",
+                "max_model_calls",
+                "max_total_tokens",
+                "max_wall_time_seconds",
+                "model_call_timeout_seconds",
+                "controller_call_timeout_seconds",
+                "solver_call_timeout_seconds",
+                "solver_fallback_timeout_seconds",
+                "verifier_call_timeout_seconds",
+                "solver_timeout_retries",
+                "solver_timeout_circuit_breaker",
+                "controller_structured_output_mode",
+                "solver_structured_output_mode",
+                "verifier_structured_output_mode",
+                "solver_visible_output_tokens",
+                "solver_reasoning_allowance_tokens",
+                "verifier_visible_output_tokens",
+                "verifier_length_retry_tokens",
+                "auxiliary_reasoning_reserve_tokens",
+                "skip_verifier_on_deterministic_errors",
+                "min_authority_level",
+                "prompt_version",
+                "controller_model",
+                "solver_model",
+                "solver_fallback_model",
+                "verifier_model",
+            },
+            prefix,
+        )
+        mode = str(value.get("mode", "closed_book")).strip()
+        if mode not in {"closed_book", "open_book", "auto"}:
+            raise ConfigurationError(
+                f"{prefix}.mode must be closed_book, open_book, or auto"
+            )
+        prompt_version = str(
+            value.get("prompt_version", "legal-mcq-three-role-v5")
+        ).strip()
+        if not prompt_version:
+            raise ConfigurationError(f"{prefix}.prompt_version cannot be empty")
+        max_revision_rounds = _integer(
+            value.get("max_revision_rounds", 1),
+            f"{prefix}.max_revision_rounds",
+            0,
+            1,
+        )
+        max_model_calls = _integer(
+            value.get("max_model_calls", 7),
+            f"{prefix}.max_model_calls",
+            3,
+        )
+        fallback_configured = bool(
+            _mapping(
+                value.get("solver_fallback_model"),
+                f"{prefix}.solver_fallback_model",
+            )
+        )
+        required_calls = (
+            3
+            + (2 * max_revision_rounds)
+            + (1 if fallback_configured else 0)
+        )
+        if max_model_calls < required_calls:
+            raise ConfigurationError(
+                f"{prefix}.max_model_calls requires at least {required_calls} "
+                "for the configured revision budget"
+            )
+        max_wall_time_seconds = _number(
+            value.get("max_wall_time_seconds", 180.0),
+            f"{prefix}.max_wall_time_seconds",
+            0.0,
+            3600.0,
+            inclusive=False,
+        )
+        model_call_timeout_seconds = _number(
+            value.get("model_call_timeout_seconds", 60.0),
+            f"{prefix}.model_call_timeout_seconds",
+            0.0,
+            600.0,
+            inclusive=False,
+        )
+        if model_call_timeout_seconds > max_wall_time_seconds:
+            raise ConfigurationError(
+                f"{prefix}.model_call_timeout_seconds cannot exceed "
+                f"{prefix}.max_wall_time_seconds"
+            )
+        role_timeouts = {
+            "controller_call_timeout_seconds": _number(
+                value.get("controller_call_timeout_seconds", 30.0),
+                f"{prefix}.controller_call_timeout_seconds",
+                0.0,
+                600.0,
+                inclusive=False,
+            ),
+            "solver_call_timeout_seconds": _number(
+                value.get("solver_call_timeout_seconds", 70.0),
+                f"{prefix}.solver_call_timeout_seconds",
+                0.0,
+                600.0,
+                inclusive=False,
+            ),
+            "solver_fallback_timeout_seconds": _number(
+                value.get("solver_fallback_timeout_seconds", 45.0),
+                f"{prefix}.solver_fallback_timeout_seconds",
+                0.0,
+                600.0,
+                inclusive=False,
+            ),
+            "verifier_call_timeout_seconds": _number(
+                value.get("verifier_call_timeout_seconds", 30.0),
+                f"{prefix}.verifier_call_timeout_seconds",
+                0.0,
+                600.0,
+                inclusive=False,
+            ),
+        }
+        for field_name, timeout in role_timeouts.items():
+            if timeout > max_wall_time_seconds:
+                raise ConfigurationError(
+                    f"{prefix}.{field_name} cannot exceed "
+                    f"{prefix}.max_wall_time_seconds"
+                )
+        solver_structured_output_mode = str(
+            value.get("solver_structured_output_mode", "auto")
+        ).strip()
+        if solver_structured_output_mode not in {
+            "auto",
+            "json_schema",
+            "prompt_only",
+        }:
+            raise ConfigurationError(
+                f"{prefix}.solver_structured_output_mode must be auto, "
+                "json_schema, or prompt_only"
+            )
+        verifier_structured_output_mode = str(
+            value.get("verifier_structured_output_mode", "auto")
+        ).strip()
+        if verifier_structured_output_mode not in {
+            "auto",
+            "json_schema",
+            "prompt_only",
+        }:
+            raise ConfigurationError(
+                f"{prefix}.verifier_structured_output_mode must be auto, "
+                "json_schema, or prompt_only"
+            )
+        controller_structured_output_mode = str(
+            value.get("controller_structured_output_mode", "auto")
+        ).strip()
+        if controller_structured_output_mode not in {"auto", "json_schema", "prompt_only"}:
+            raise ConfigurationError(
+                f"{prefix}.controller_structured_output_mode must be auto, "
+                "json_schema, or prompt_only"
+            )
+        verifier_visible_output_tokens = _integer(
+            value.get("verifier_visible_output_tokens", 384),
+            f"{prefix}.verifier_visible_output_tokens",
+            64,
+        )
+        verifier_length_retry_tokens = _integer(
+            value.get("verifier_length_retry_tokens", 512),
+            f"{prefix}.verifier_length_retry_tokens",
+            64,
+        )
+        if verifier_length_retry_tokens < verifier_visible_output_tokens:
+            raise ConfigurationError(
+                f"{prefix}.verifier_length_retry_tokens cannot be smaller "
+                f"than {prefix}.verifier_visible_output_tokens"
+            )
+        return cls(
+            enabled=_boolean(value.get("enabled", False), f"{prefix}.enabled"),
+            mode=mode,
+            seed=_integer(value.get("seed", 42), f"{prefix}.seed", 0),
+            max_attempts=_integer(
+                value.get("max_attempts", 2),
+                f"{prefix}.max_attempts",
+                1,
+                3,
+            ),
+            max_revision_rounds=max_revision_rounds,
+            max_model_calls=max_model_calls,
+            max_total_tokens=_integer(
+                value.get("max_total_tokens", 32768),
+                f"{prefix}.max_total_tokens",
+                1024,
+            ),
+            max_wall_time_seconds=max_wall_time_seconds,
+            model_call_timeout_seconds=model_call_timeout_seconds,
+            controller_call_timeout_seconds=role_timeouts[
+                "controller_call_timeout_seconds"
+            ],
+            solver_call_timeout_seconds=role_timeouts[
+                "solver_call_timeout_seconds"
+            ],
+            solver_fallback_timeout_seconds=role_timeouts[
+                "solver_fallback_timeout_seconds"
+            ],
+            verifier_call_timeout_seconds=role_timeouts[
+                "verifier_call_timeout_seconds"
+            ],
+            solver_timeout_retries=_integer(
+                value.get("solver_timeout_retries", 0),
+                f"{prefix}.solver_timeout_retries",
+                0,
+                0,
+            ),
+            solver_timeout_circuit_breaker=_integer(
+                value.get("solver_timeout_circuit_breaker", 2),
+                f"{prefix}.solver_timeout_circuit_breaker",
+                1,
+            ),
+            solver_structured_output_mode=solver_structured_output_mode,
+            controller_structured_output_mode=controller_structured_output_mode,
+            verifier_structured_output_mode=verifier_structured_output_mode,
+            solver_visible_output_tokens=_integer(
+                value.get("solver_visible_output_tokens", 2048),
+                f"{prefix}.solver_visible_output_tokens", 128,
+            ),
+            solver_reasoning_allowance_tokens=_integer(
+                value.get("solver_reasoning_allowance_tokens", 2048),
+                f"{prefix}.solver_reasoning_allowance_tokens", 0,
+            ),
+            verifier_visible_output_tokens=verifier_visible_output_tokens,
+            verifier_length_retry_tokens=verifier_length_retry_tokens,
+            auxiliary_reasoning_reserve_tokens=_integer(
+                value.get("auxiliary_reasoning_reserve_tokens", 1024),
+                f"{prefix}.auxiliary_reasoning_reserve_tokens", 0,
+            ),
+            skip_verifier_on_deterministic_errors=_boolean(
+                value.get("skip_verifier_on_deterministic_errors", True),
+                f"{prefix}.skip_verifier_on_deterministic_errors",
+            ),
+            min_authority_level=_integer(
+                value.get("min_authority_level", 4),
+                f"{prefix}.min_authority_level",
+                0,
+                5,
+            ),
+            prompt_version=prompt_version,
+            controller_model=cls._role_model(
+                _mapping(value.get("controller_model"), f"{prefix}.controller_model"),
+                role="controller",
+                generation=generation,
+                environ=environ,
+                default_temperature=0.0,
+                default_max_tokens=1200,
+            ),
+            solver_model=cls._role_model(
+                _mapping(value.get("solver_model"), f"{prefix}.solver_model"),
+                role="solver",
+                generation=generation,
+                environ=environ,
+                default_temperature=0.2,
+                default_max_tokens=6144,
+            ),
+            solver_fallback_model=cls._role_model(
+                _mapping(
+                    value.get("solver_fallback_model"),
+                    f"{prefix}.solver_fallback_model",
+                ),
+                role="solver_fallback",
+                generation=generation,
+                environ=environ,
+                default_temperature=0.0,
+                default_max_tokens=4096,
+            ),
+            verifier_model=cls._role_model(
+                _mapping(value.get("verifier_model"), f"{prefix}.verifier_model"),
+                role="verifier",
+                generation=generation,
+                environ=environ,
+                default_temperature=0.0,
+                default_max_tokens=768,
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class LGAgentConfig:
     generation: ModelConfig
     lgagent_plus: LGAgentPlusConfig
+    legal_mcq: LegalMCQSettings = field(default_factory=LegalMCQSettings)
 
 
 def _load_verifier_model(
@@ -593,6 +1230,7 @@ def _load_generation(
             "temperature": sampling.get("temperature", 0.7),
             "top_p": sampling.get("top_p", 0.8),
             "max_tokens": sampling.get("max_tokens", 2048),
+            "reasoning_effort": sampling.get("reasoning_effort"),
         }
     )
 
@@ -605,13 +1243,25 @@ def load_lgagent_config(
     payload = _load_yaml(path)
     environment = os.environ if environ is None else environ
     generation = _load_generation(payload, environment)
+    plus = LGAgentPlusConfig.from_mapping(
+        _mapping(payload.get("lgagent_plus"), "lgagent_plus"),
+        generation=generation,
+        environ=environment,
+    )
+    legal_mcq = LegalMCQSettings.from_mapping(
+        _mapping(payload.get("legal_mcq"), "legal_mcq"),
+        generation=generation,
+        environ=environment,
+    )
+    if legal_mcq.enabled and plus.enabled:
+        raise ConfigurationError(
+            "legal_mcq.enabled and lgagent_plus.enabled are mutually exclusive "
+            "rollback-safe pipeline routes"
+        )
     return LGAgentConfig(
         generation=generation,
-        lgagent_plus=LGAgentPlusConfig.from_mapping(
-            _mapping(payload.get("lgagent_plus"), "lgagent_plus"),
-            generation=generation,
-            environ=environment,
-        ),
+        lgagent_plus=plus,
+        legal_mcq=legal_mcq,
     )
 
 

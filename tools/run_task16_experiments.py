@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
@@ -66,6 +68,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="覆盖 profile 的 Task 14 experiment key 列表",
     )
     parser.add_argument(
+        "--datasets",
+        nargs="+",
+        help="仅运行冻结清单中的指定数据集路径",
+    )
+    parser.add_argument(
         "--max-examples",
         type=int,
         help="覆盖 profile 的每数据集最大题数",
@@ -75,6 +82,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs="+",
         type=int,
         help="覆盖 profile 的随机种子列表",
+    )
+    parser.add_argument(
+        "--model",
+        help="覆盖冻结配置中的模型 ID，例如 qwen3-4b",
     )
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--checkpoint-every", type=int, default=10)
@@ -91,6 +102,9 @@ def resolve_plan(args: argparse.Namespace) -> dict[str, Any]:
             if args.experiments is not None
             else profile.experiment_keys
         ),
+        "dataset_paths": (
+            tuple(args.datasets) if args.datasets is not None else None
+        ),
         "max_examples": (
             args.max_examples
             if args.max_examples is not None
@@ -101,10 +115,12 @@ def resolve_plan(args: argparse.Namespace) -> dict[str, Any]:
             if args.seeds is not None
             else profile.seeds
         ),
+        "model_id": args.model,
     }
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_dotenv(ROOT_DIR / ".env")
     args = parse_args(argv)
     if args.max_examples is not None and args.max_examples <= 0:
         raise SystemExit("--max-examples must be positive")

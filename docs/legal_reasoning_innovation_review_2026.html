@@ -1,0 +1,230 @@
+<meta charset="utf-8">
+<style>
+body { font-family: "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.65; margin: 42px; color: #1f2933; }
+h1 { font-size: 27px; text-align: center; margin-bottom: 6px; }
+h2 { font-size: 20px; margin-top: 28px; border-bottom: 1px solid #aeb6bf; padding-bottom: 5px; }
+h3 { font-size: 16px; margin-top: 20px; }
+p, li, td, th { font-size: 10.8pt; }
+.subtitle { text-align: center; color: #52606d; margin-bottom: 24px; }
+.box { border-left: 4px solid #2463a6; background: #f3f6f9; padding: 9px 13px; margin: 12px 0; }
+.warn { border-left: 4px solid #a33a2b; background: #fbf4f2; padding: 9px 13px; margin: 12px 0; }
+table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+th, td { border: 1px solid #aeb6bf; padding: 6px; vertical-align: top; }
+th { background: #edf1f4; }
+code { font-family: Menlo, monospace; font-size: 9.8pt; }
+pre { background: #f5f6f7; padding: 12px; white-space: pre-wrap; }
+a { color: #174ea6; }
+</style>
+
+<h1>小模型法律推理的下一步创新方向</h1>
+<p class="subtitle">系统性范围综述、研究空白与可执行方案 | 检索截止：2026-09-03</p>
+
+<h2>执行摘要</h2>
+<p>本报告围绕法律大语言模型、法律检索增强、神经符号推理、推理时计算、多智能体验证、风险校准与法律评测开展系统性范围检索。证据表明，单纯增加 RAG、网页搜索、同模型多智能体辩论或更多推理轮次已经不是具有充分原创性的方向，而且这些方法在小模型上可能产生负迁移。项目自身的 100 题实验进一步显示：Qwen3-8B 的 Original LGAgent 为 50%，BOLT-Web 为 49%；在 25 个实际注入证据的样本中，仅改对 1 题、改错 5 题。</p>
+<div class="box"><b>主推方向：</b>建立“因果法律干预路由”（Causal Legal Intervention Routing, CLIR）。研究目标不再是预测模型是否会答错，而是估计每种推理干预对当前问题的条件增量收益，并在有限样本风险约束下，仅执行有正收益下界的干预。与之配套，构建包含多种干预潜在结果的 LawIntervene 基准，并要求任何答案切换携带可机器核验的法律证明证书。</div>
+<p>该方向的学术价值在于把法律推理增强从启发式流水线转化为带有反事实定义、决策理论目标和非劣性约束的选择性干预问题；工程上可复用现有 LGAgent 基线、结果日志和 CPU 级校准器，不需要本地 GPU。</p>
+
+<h2>1. 检索方法与证据等级</h2>
+<p>本次采用系统性范围综述，而非声称满足完整 PRISMA 医学综述规范。检索重点覆盖 2023-2026 年以下来源：</p>
+<ul>
+<li>法律 AI 旗舰与交叉期刊：<i>Artificial Intelligence and Law</i>、<i>Journal of Empirical Legal Studies</i>、ACM Computing Surveys 等。</li>
+<li>正式顶会：ACL、EMNLP、NAACL、NeurIPS、ICLR、ICML、SIGIR、ICAIL、COLING。</li>
+<li>最新预印本：仅用于识别前沿竞争方向，单独标记，不作为已经确证的结论。</li>
+</ul>
+<p>检索主题包括 legal LLM benchmark、legal RAG、statutory temporal reasoning、case retrieval、process reward model、test-time compute、multi-agent debate、conformal risk control、neuro-symbolic legal reasoning、counterfactual legal evaluation。优先使用 ACL Anthology、PMLR、OpenReview、期刊 DOI 页面和作者项目页。</p>
+
+<h2>2. 研究进展谱系</h2>
+<table>
+<tr><th>方向</th><th>代表性正式工作</th><th>主要进展</th><th>仍未解决的问题</th></tr>
+<tr><td>法律能力评测</td><td>LegalBench (NeurIPS 2023)；LexEval (NeurIPS 2024)；LawBench (EMNLP 2024)；PLawBench (ACL 2026)</td><td>从单任务扩展到能力分类、真实工作流和细粒度 rubric。</td><td>静态题目、结果指标和 LLM-as-a-judge 仍难区分记忆、检索与真实推理；缺少“某项干预为何有效”的潜在结果标注。</td></tr>
+<tr><td>法律知识与引用</td><td>CLaw (Findings EMNLP 2025)；CitaLaw (Findings ACL 2025)；CaseFacts (ACL 2026)</td><td>细化到法条版本、引用对齐、支持/反驳/推翻等关系。</td><td>检索相关性不等于生成效用；CaseFacts 明确发现无限制网页搜索可能低于闭卷基线。</td></tr>
+<tr><td>法律 RAG</td><td>Adaptive-RAG (NAACL 2024)；Self-RAG (ICLR 2024)；AALawyer (ACL 2026)</td><td>从固定检索转向按复杂度路由、自反思，以及法条与判例双检索。</td><td>大多优化平均正确率或检索指标，没有直接控制“相对闭卷答案的增量伤害”；法律软智能题不一定需要外部法条。</td></tr>
+<tr><td>风险与可靠性</td><td>C-RAG (ICML 2024)；Conformal-RAG (SIGIR 2025)；JELS 2025 法律研究工具实证</td><td>开始提供生成风险、子命题事实性和商业法律工具幻觉率的统计评估。</td><td>已有保证多针对绝对风险或证据覆盖，尚未直接解决“增强动作是否比不增强更差”的配对非劣性问题。</td></tr>
+<tr><td>推理时计算与验证</td><td>Compute-optimal test-time scaling (ICLR 2025 Oral)；Weaver (NeurIPS 2025)；ReasonFlux-PRM (NeurIPS 2025)</td><td>按题目难度分配计算；用多个弱验证器或过程奖励选择候选。</td><td>主要证据来自数学和代码；验证器正确性与生成器错误高度相关，迁移到开放纹理法律规则尚未解决。</td></tr>
+<tr><td>小模型推理</td><td>Self-RAG 7B/13B；T1 tool-integrated self-verification；2026 小模型法律比较研究</td><td>工具验证、少量微调和测试时采样可提升部分任务。</td><td>最新研究发现 RAG 对 NLI 可能有益、却会伤害法律多选题；NeurIPS 2025 Kinetics 还指出测试时扩展对低于某规模阈值的模型可能被高估。</td></tr>
+<tr><td>神经符号法律推理</td><td>Artificial Intelligence and Law 2025 民事判决框架；Logic-of-Thought (NAACL 2025)；AALawyer (ACL 2026)</td><td>把法律要件、逻辑约束、判例类比和生成模型组合。</td><td>自动形式化是新的单点故障；开放纹理概念、价值权衡和隐含前提难以完全编码。</td></tr>
+<tr><td>动态与反事实评测</td><td>CLAUSE (Findings EACL 2026)；CaseFacts (ACL 2026)；PLawBench (ACL 2026)</td><td>通过细微扰动、时效关系和真实流程暴露静态准确率看不到的错误。</td><td>现有反事实多用于鲁棒性或公平性，尚缺“多种增强动作潜在结果”的法律干预基准。</td></tr>
+</table>
+
+<h2>3. 前沿动态</h2>
+<h3>3.1 从“是否检索”转向“检索是否对生成有用”</h3>
+<p>Adaptive-RAG 依据问题复杂度选择无检索、单步或迭代检索；Self-RAG 通过训练反思 token 控制检索与批判；2026 年 R3AG 更进一步区分检索质量与生成效用。这说明简单置信度门控已经拥挤，新的贡献必须刻画检索对最终决策的增量作用，而不能只判断文本相关。</p>
+
+<h3>3.2 从最终答案转向过程、引用与结构</h3>
+<p>CitaLaw 评估引用与回答句子的法律蕴含，CogniBench 区分事实陈述与认知推断，PLawBench 用约 12,500 条专家 rubric 评估真实法律工作。研究重心正在从“答案对不对”转向“事实、规则、适用和结论之间的路径是否成立”。</p>
+
+<h3>3.3 从同质化自检转向异质验证</h3>
+<p>Weaver 表明多个弱但异质的验证器经过加权组合可以显著优于简单平均；T1 指出小模型在依赖记忆的自验证中尤其薄弱，工具验证更有价值。这与项目中“同一个 DeepSeek-V3 同时生成和验证导致同质错误”的观察一致。</p>
+
+<h3>3.4 法律时间、法域和权威性成为硬约束</h3>
+<p>CaseFacts 将 Supported、Refuted 与 Overruled 分开；2026 年时态法条 QA 工作发现网页搜索存在明显“新法偏好”，历史问题必须按事实日期选择有效版本。检索系统不应仅给相关文本，而应执行法域、位阶、有效期和推翻关系约束。</p>
+
+<h3>3.5 小模型的“多想”并不必然更好</h3>
+<p>LexGenius 论文报告三重解耦：模型规模与法律能力非线性，CoT 在确定性法律任务上可能负迁移，RAG 的知识获取与推理能力相互正交；只有 GRPO 在其设置中表现出较稳定增益。Kinetics 的结果也警告，测试时计算对很小模型的收益可能被高估。</p>
+
+<h2>4. 项目现有证据与文献的交叉验证</h2>
+<table>
+<tr><th>本项目观察</th><th>外部文献对应</th><th>科学含义</th></tr>
+<tr><td>Qwen3-8B Original 50%，BOLT-Web 49%</td><td>CaseFacts：无限制 Web 搜索低于闭卷；小模型法律比较：RAG 伤害多选题</td><td>Web 可用性不是核心瓶颈；错误知识注入会扩大决策偏差。</td></tr>
+<tr><td>25 个证据采纳样本中改对 1、改错 5</td><td>R3AG：相关性与生成效用不同；C-RAG：RAG 只有在检索器与生成器质量满足条件时才降低风险</td><td>必须直接学习“干预收益”，不能以相关度代替收益。</td></tr>
+<tr><td>30 个 Original 错题经搜索仅救回 1 题</td><td>LexGenius：知识检索与法律推理正交</td><td>大量错误来自规则适用、例外、题干极性和价值判断，而非知识缺失。</td></tr>
+<tr><td>Joint 提升执行成功率但未证明提升准确率</td><td>S2-MAD：需压缩无效交流；Weaver：验证器质量和异质性比数量重要</td><td>增加角色和调用数主要提升流程冗余，不自动增加认识论信息。</td></tr>
+<tr><td>同一模型兼任生成器和验证器</td><td>T1、Weaver、PRM 文献强调 verifier gap</td><td>相关错误无法通过同源自检消除，需要异质、可执行或独立监督信号。</td></tr>
+</table>
+
+<h2>5. 已拥挤或不建议继续作为主创新的方向</h2>
+<ol>
+<li><b>普通法律 RAG / Web Search：</b>Self-RAG、Adaptive-RAG、AALawyer、CaseFacts 和大量法律 RAG 已覆盖；项目实验还是负结果。</li>
+<li><b>简单置信度触发：</b>Adaptive-RAG、Self-Routing RAG 和 2026 uncertainty routing 已直接研究，且自报置信度校准较差。</li>
+<li><b>增加 Agent 数量或辩论轮次：</b>OptAgent、S2-MAD、立场辩论和 Weaver 已形成密集研究线；同模型角色并不等于独立证据。</li>
+<li><b>仅做法律知识图谱或时效过滤：</b>已有 CLaw、AALawyer、CaseFacts 和时态法条 QA；可作为组件，难以单独构成强创新。</li>
+<li><b>仅接入 SMT/逻辑求解器：</b>L4M、LOGicalThought 等已覆盖。真正空白是如何识别自动形式化缺失的隐含前提，以及何时信任证明。</li>
+<li><b>仅做更多 CoT：</b>LexGenius 与 ContractEval 均提示 thinking/CoT 可能降低确定性法律任务的正确性。</li>
+</ol>
+
+<h2>6. 候选创新方向排名</h2>
+<table>
+<tr><th>方向</th><th>原创潜力</th><th>可行性</th><th>与现有工作重叠</th><th>建议</th></tr>
+<tr><td>因果法律干预路由 + 非劣性风险控制</td><td>高</td><td>高</td><td>与 adaptive RAG、C-RAG 邻近，但研究对象和保证不同</td><td><b>主推</b></td></tr>
+<tr><td>最小法律证明证书 + 答案切换门控</td><td>中高</td><td>中</td><td>与 AALawyer、L4M、Logic-of-Thought 有交叉</td><td>作为主方法第二组件</td></tr>
+<tr><td>多干预潜在结果法律基准 LawIntervene</td><td>高</td><td>高</td><td>现有 benchmark 多测能力，不测干预收益</td><td>作为数据与评测贡献</td></tr>
+<tr><td>异质弱验证器组合</td><td>中</td><td>中高</td><td>Weaver 已给出一般框架</td><td>作为消融或工具层</td></tr>
+<tr><td>时态法律知识图谱</td><td>中低</td><td>中</td><td>2025-2026 已快速拥挤</td><td>不单独立题</td></tr>
+<tr><td>动态多智能体辩论</td><td>低</td><td>中</td><td>已有大量结构搜索、强化学习和稀疏辩论</td><td>不建议</td></tr>
+</table>
+
+<h2>7. 主推创新：CLIR</h2>
+<h3>7.1 关键科学问题</h3>
+<p>给定一个法律问题和闭卷模型状态，如何在不知道测试答案的情况下判断“哪一种推理干预会提高正确率”，并保证所选择的干预不会系统性地劣于不干预？该问题区别于：</p>
+<ul>
+<li>错误预测：只估计当前答案是否错误；</li>
+<li>复杂度分类：只估计问题需要几步推理；</li>
+<li>检索相关度：只估计文档与查询是否相关；</li>
+<li>绝对风险校准：只估计输出是否可靠。</li>
+</ul>
+<p>CLIR 直接估计动作的条件增量效果。</p>
+
+<h3>7.2 数学定义</h3>
+<p>令动作集合为：</p>
+<pre>A = {a0: 不干预,
+     a1: 权威法条检索,
+     a2: 类案检索,
+     a3: 规则/例外/题干极性符号核验,
+     a4: 异质候选采样与验证}</pre>
+<p>对问题表征 <code>x</code> 和动作 <code>a</code>，定义条件增量正确率：</p>
+<pre>tau_a(x) = P(Y(a)=1 | X=x) - P(Y(a0)=1 | X=x)</pre>
+<p>路由器选择：</p>
+<pre>pi(x) = argmax_a [LCB_alpha(tau_a(x)) - lambda * Cost(a)]</pre>
+<p>只有当最优动作的增益下置信界大于零时才干预，否则保持闭卷。研究目标是在独立校准集的交换性等假设下，给出策略相对基线的有限样本非劣性界：</p>
+<pre>P(R(pi) - R(a0) &gt; epsilon) &lt;= delta</pre>
+<p>这不是对单题“必然正确”的保证，而是对被选择样本群体的超额错误风险进行控制。</p>
+
+<h3>7.3 为什么具有原创性</h3>
+<ul>
+<li>Adaptive-RAG 预测问题复杂度；CLIR 预测动作相对不动作的因果增益。</li>
+<li>R3AG 学习检索器与生成器效用；CLIR 在多个异质法律干预间学习潜在结果，并允许“不干预”。</li>
+<li>C-RAG 认证绝对生成风险；CLIR 控制相对闭卷基线的增量伤害。</li>
+<li>现有法律 benchmark 给出题目答案；LawIntervene 还给出不同干预臂的配对结果和伤害标签。</li>
+</ul>
+<div class="warn"><b>新颖性边界：</b>“因果路由”“conformal risk control”和“法律证明”分别已有相邻工作。论文贡献必须是三者的严格统一：多动作潜在结果、相对基线的非劣性保证、法律专用干预与证明证书。不能只实现一个分类器后称为因果方法。</div>
+
+<h3>7.4 法律证明证书</h3>
+<p>干预不得直接覆盖 B0。它必须输出可检查证书：</p>
+<pre>{
+  issue,
+  governing_rule: {article, authority, jurisdiction, valid_time},
+  element_bindings: [{element, fact, status}],
+  exceptions: [{exception, triggered, evidence}],
+  question_polarity,
+  option_effect: SUPPORT | REFUTE | NEI,
+  minimal_answer_switch_reason
+}</pre>
+<p>确定性检查器验证法域、时间、位阶、引用跨度、要件完整性和题干极性。只有证书直接反驳 B0 或唯一支持另一选项时才允许切换；否则保留 B0 或拒答。该机制把“搜到相关网页”提升为“形成足以改变裁判的最小证明”。</p>
+
+<h2>8. 配套基准：LawIntervene</h2>
+<p>为每道开发题执行全部动作臂，记录 <code>Y(a0)...Y(a4)</code>、token、时延、证据和答案变化，构建法律推理干预数据。额外生成最小反事实对：</p>
+<ul>
+<li>只改变事实发生日期，测试新法偏好与旧法适用；</li>
+<li>只改变法域或规范位阶，测试越权引用；</li>
+<li>只加入或删除构成要件/例外事实，测试规则适用；</li>
+<li>只翻转“正确/错误”题干极性，测试结论映射；</li>
+<li>加入语义相关但法律无关文本，测试干扰不变性。</li>
+</ul>
+<p>核心指标包括 Intervention Uplift、Harm Rate、Net Rescue、Invariant Accuracy、Proof Validity、Citation Entailment、Selective Risk、Coverage 和 Cost-adjusted Accuracy。该基准可以直接解释为什么某种增强对某类错误有效，而不是只给总体 EM。</p>
+
+<h2>9. 实验设计</h2>
+<h3>9.1 数据与划分</h3>
+<ul>
+<li>开发：LexGenius 独立 dev，用于收集动作潜在结果和校准路由器。</li>
+<li>主测试：LexGenius、JEC-QA、CAIL2022-sfks；测试标签不参与阈值或策略选择。</li>
+<li>外部有效性：可选 CLaw、CaseFacts 或时间敏感法条 QA。</li>
+<li>固定 seeds：42、43、44；失败样本保留在分母。</li>
+</ul>
+
+<h3>9.2 基线</h3>
+<p>Direct、CoT、Original LGAgent、Always-RAG、Adaptive-RAG、BOLT-Web、OATH-only、CAPE-only、Joint、CLIR、CLIR without proof gate、CLIR without risk bound、Oracle best action。Oracle 只作为可达上限，不参与公平比较。</p>
+
+<h3>9.3 主要检验</h3>
+<ol>
+<li>动作收益可预测性：比较自信度、问题复杂度、错误类型和因果 uplift 特征的 AUROC/排序相关性。</li>
+<li>非劣性：检验 CLIR 相对 Original 的 Harm Rate 是否低于预设阈值。</li>
+<li>有效性：检验 Net Rescue 与 EM 是否显著提升，使用配对 bootstrap 和 McNemar。</li>
+<li>跨模型迁移：在 Qwen3-4B/8B 和 DeepSeek-V3 上验证路由器是否可迁移。</li>
+<li>成本：报告每 1,000 题调用量、token、延迟和单位 EM 增益。</li>
+</ol>
+
+<h3>9.4 最小可行实现</h3>
+<ol>
+<li>先在 200-300 道独立开发题上运行 4 个动作臂，形成干预日志。</li>
+<li>用 CPU 可训练的逻辑回归、梯度提升树或小型交叉编码器估计 uplift；无需训练基础模型。</li>
+<li>使用 split conformal 或风险控制校准动作下界，只在下界为正时干预。</li>
+<li>先比较 Original、Always-RAG、置信度路由和 CLIR 四组；确认增益后再加入证明证书。</li>
+</ol>
+
+<h2>10. 阶段性判定标准</h2>
+<table>
+<tr><th>阶段</th><th>继续条件</th><th>停止条件</th></tr>
+<tr><td>动作可分性</td><td>至少一种动作的 uplift 可预测性显著高于随机</td><td>所有特征对增益 AUROC 接近 0.5</td></tr>
+<tr><td>路由有效性</td><td>Net Rescue &gt; 0，且 Harm Rate 低于预设上限</td><td>干预仍持续改错多于改对</td></tr>
+<tr><td>跨域验证</td><td>至少两个数据集、两个模型方向一致</td><td>仅单一数据集或单一模型有效</td></tr>
+<tr><td>论文主张</td><td>三 seed 配对检验显著，风险界经验覆盖成立</td><td>只有平均数改善，无显著性或覆盖失效</td></tr>
+</table>
+
+<h2>11. 推荐论文贡献表述</h2>
+<p>建议将贡献组织为三点：</p>
+<ol>
+<li>提出法律推理增强的因果干预问题，将工具选择从错误置信度预测转化为条件增量效应估计。</li>
+<li>提出带有限样本非劣性控制的选择性法律干预策略，并用证明证书约束答案切换。</li>
+<li>发布 LawIntervene，多动作配对结果与最小法律反事实 benchmark，揭示知识缺失、规则适用和证据诱导错误之间的差异。</li>
+</ol>
+<p>不建议提前使用“首次”“保证单题正确”或“显著提升”等表述。正式新颖性声明需要在投稿前继续检索 2026 年下半年最新论文。</p>
+
+<h2>12. 代表性参考文献</h2>
+<ol>
+<li><a href="https://law.stanford.edu/publications/legalbench-a-collaboratively-built-benchmark-for-measuring-legal-reasoning-in-large-language-models-2/">Guha et al. LegalBench. NeurIPS 2023.</a></li>
+<li><a href="https://openreview.net/forum?id=8RaxRs5VDf">Li et al. LexEval. NeurIPS 2024.</a></li>
+<li><a href="https://ar5iv.labs.arxiv.org/html/2309.16289">Fei et al. LawBench. EMNLP 2024.</a></li>
+<li><a href="https://aclanthology.org/2026.acl-long.458/">Shi et al. PLawBench. ACL 2026.</a></li>
+<li><a href="https://aclanthology.org/2025.findings-emnlp.646/">Xu et al. CLaw. Findings EMNLP 2025.</a></li>
+<li><a href="https://aclanthology.org/2025.findings-acl.583/">Zhang et al. CitaLaw. Findings ACL 2025.</a></li>
+<li><a href="https://aclanthology.org/2026.acl-long.785/">Putta et al. CaseFacts. ACL 2026.</a></li>
+<li><a href="https://aclanthology.org/2026.acl-long.633/">Huang et al. AALawyer. ACL 2026.</a></li>
+<li><a href="https://aclanthology.org/2026.findings-eacl.305/">Choudhury et al. CLAUSE. Findings EACL 2026.</a></li>
+<li><a href="https://onlinelibrary.wiley.com/doi/full/10.1111/jels.12413">Magesh et al. Hallucination-Free? Journal of Empirical Legal Studies, 2025.</a></li>
+<li><a href="https://doi.org/10.1007/s10506-025-09433-1">Wei et al. Neuro-symbolic legal judgment prediction. Artificial Intelligence and Law, 2025.</a></li>
+<li><a href="https://aclanthology.org/2024.naacl-long.389/">Jeong et al. Adaptive-RAG. NAACL 2024.</a></li>
+<li><a href="https://openreview.net/forum?id=hSyW5go0v8">Asai et al. Self-RAG. ICLR 2024 Oral.</a></li>
+<li><a href="https://proceedings.mlr.press/v235/kang24a.html">Kang et al. C-RAG. ICML 2024.</a></li>
+<li><a href="https://openreview.net/forum?id=4FWAwZtd2n">Snell et al. Compute-optimal test-time scaling. ICLR 2025 Oral.</a></li>
+<li><a href="https://openreview.net/forum?id=dRjt4vlYVQ">Saad-Falcon et al. Weaver. NeurIPS 2025.</a></li>
+<li><a href="https://aclanthology.org/2025.naacl-long.475/">Zeng et al. S2-MAD. NAACL 2025.</a></li>
+<li><a href="https://aclanthology.org/2025.acl-long.1046/">Tang et al. CogniBench. ACL 2025.</a></li>
+<li><a href="https://openreview.net/forum?id=phWwTrrJFv">Sadhukhan et al. Kinetics. NeurIPS 2025.</a></li>
+<li><a href="https://arxiv.org/html/2605.23497v1">Prior et al. Temporal failure modes in statutory QA. ICAIL 2026.</a></li>
+<li><a href="https://arxiv.org/html/2603.25944v1">Vaddi. Can Small Models Reason About Legal Documents? Preprint, 2026.</a></li>
+<li><a href="https://arxiv.org/html/2511.21033v1">Chen et al. L4M formal legal reasoning. Preprint, 2025.</a></li>
+<li><a href="https://arxiv.org/html/2512.04578v2">Liu et al. LexGenius. Preprint, 2025.</a></li>
+</ol>
+
+<h2>最终判断</h2>
+<p>当前最有希望形成高质量论文的路线，不是继续叠加检索或 Agent，而是把项目已经获得的负面结果上升为新的科学问题：<b>为什么推理增强会伤害小模型，以及如何在有限样本下只选择真正有增量价值的法律干预？</b> CLIR + LawIntervene + 证明证书构成一个统一、可证伪、可实现且与现有工作有清晰边界的研究方向。</p>
