@@ -225,7 +225,7 @@ legal_mcq:
 Revision Solver 再切备用时为 6 次。7 次上限保留一个协议修复调用，同时
 通过阶段保留量保证 Solver 修订后仍能执行最终 Verifier。
 每次调用同时受角色级上限和题级剩余时间约束；当前前沿模型配置为
-Controller 30 秒、主 Solver 120 秒、备用 Solver 90 秒、Verifier 45 秒。
+Controller 60 秒、主 Solver 120 秒、备用 Solver 90 秒、Verifier 45 秒。
 OpenAI-compatible 客户端禁用 SDK 隐式重试，所有逻辑调用都进入统一
 Trace 和预算。
 

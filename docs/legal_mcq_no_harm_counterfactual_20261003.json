@@ -1,0 +1,56 @@
+{
+  "allow_override": 0,
+  "counterfactual_accuracy": 0.6551724137931034,
+  "counterfactual_correct": 19,
+  "counterfactual_method": "closed-book replay: preserve historical Direct prediction whenever Chain and Direct predictions differ",
+  "disagreements": [
+    {
+      "action": "preserve_anchor",
+      "chain_prediction": [
+        "A"
+      ],
+      "counterfactual_correct": false,
+      "direct_anchor_prediction": [
+        "B"
+      ],
+      "golden_answers": [
+        "C"
+      ],
+      "question_id": "290"
+    },
+    {
+      "action": "preserve_anchor",
+      "chain_prediction": [
+        "D"
+      ],
+      "counterfactual_correct": true,
+      "direct_anchor_prediction": [
+        "B"
+      ],
+      "golden_answers": [
+        "B"
+      ],
+      "question_id": "313"
+    },
+    {
+      "action": "preserve_anchor",
+      "chain_prediction": [
+        "B"
+      ],
+      "counterfactual_correct": false,
+      "direct_anchor_prediction": [
+        "B",
+        "D"
+      ],
+      "golden_answers": [
+        "C"
+      ],
+      "question_id": "427"
+    }
+  ],
+  "matched": 26,
+  "preserve_anchor": 3,
+  "source_chain_results": "output/legal_mcq/effectiveness-dev29-20260928-seed42/results.jsonl",
+  "source_direct_results": "output/legal_mcq/effectiveness-dev29-20260928-seed42/direct-baseline/results.jsonl",
+  "total": 29
+}

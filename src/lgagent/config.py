@@ -777,7 +777,7 @@ class LegalMCQSettings:
     max_total_tokens: int = 32768
     max_wall_time_seconds: float = 180.0
     model_call_timeout_seconds: float = 60.0
-    controller_call_timeout_seconds: float = 30.0
+    controller_call_timeout_seconds: float = 60.0
     solver_call_timeout_seconds: float = 70.0
     solver_fallback_timeout_seconds: float = 45.0
     verifier_call_timeout_seconds: float = 30.0
@@ -792,6 +792,8 @@ class LegalMCQSettings:
     verifier_length_retry_tokens: int = 512
     auxiliary_reasoning_reserve_tokens: int = 1024
     skip_verifier_on_deterministic_errors: bool = True
+    no_harm_gate_enabled: bool = False
+    no_harm_anchor_max_tokens: int = 4096
     min_authority_level: int = 4
     prompt_version: str = "legal-mcq-three-role-v5"
     controller_model: ModelConfig | None = None
@@ -891,6 +893,8 @@ class LegalMCQSettings:
                 "verifier_length_retry_tokens",
                 "auxiliary_reasoning_reserve_tokens",
                 "skip_verifier_on_deterministic_errors",
+                "no_harm_gate_enabled",
+                "no_harm_anchor_max_tokens",
                 "min_authority_level",
                 "prompt_version",
                 "controller_model",
@@ -927,10 +931,15 @@ class LegalMCQSettings:
                 f"{prefix}.solver_fallback_model",
             )
         )
+        no_harm_gate_enabled = _boolean(
+            value.get("no_harm_gate_enabled", False),
+            f"{prefix}.no_harm_gate_enabled",
+        )
         required_calls = (
             3
             + (2 * max_revision_rounds)
             + (1 if fallback_configured else 0)
+            + (1 if no_harm_gate_enabled else 0)
         )
         if max_model_calls < required_calls:
             raise ConfigurationError(
@@ -958,7 +967,7 @@ class LegalMCQSettings:
             )
         role_timeouts = {
             "controller_call_timeout_seconds": _number(
-                value.get("controller_call_timeout_seconds", 30.0),
+                value.get("controller_call_timeout_seconds", 60.0),
                 f"{prefix}.controller_call_timeout_seconds",
                 0.0,
                 600.0,
@@ -1101,6 +1110,12 @@ class LegalMCQSettings:
             skip_verifier_on_deterministic_errors=_boolean(
                 value.get("skip_verifier_on_deterministic_errors", True),
                 f"{prefix}.skip_verifier_on_deterministic_errors",
+            ),
+            no_harm_gate_enabled=no_harm_gate_enabled,
+            no_harm_anchor_max_tokens=_integer(
+                value.get("no_harm_anchor_max_tokens", 4096),
+                f"{prefix}.no_harm_anchor_max_tokens",
+                128,
             ),
             min_authority_level=_integer(
                 value.get("min_authority_level", 4),

@@ -60,7 +60,7 @@ legal_mcq:
   max_total_tokens: 65536
   max_wall_time_seconds: 360
   model_call_timeout_seconds: 60
-  controller_call_timeout_seconds: 30
+  controller_call_timeout_seconds: 60
   solver_call_timeout_seconds: 120
   solver_fallback_timeout_seconds: 90
   verifier_call_timeout_seconds: 45
@@ -75,6 +75,9 @@ legal_mcq:
   verifier_length_retry_tokens: 512
   auxiliary_reasoning_reserve_tokens: 2048
   skip_verifier_on_deterministic_errors: true
+  # Opt-in until a new independent dev set proves the no-harm gate.
+  no_harm_gate_enabled: false
+  no_harm_anchor_max_tokens: 4096
   min_authority_level: 4
   prompt_version: legal-mcq-three-role-v5
   # The controller and verifier can use economical models. The solver should

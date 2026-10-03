@@ -206,12 +206,15 @@ def _dry_run_payload(config: LGAgentConfig, count: int) -> dict[str, Any]:
         "route": "legal-mcq-three-role",
         "items": count,
         "estimated_calls": {
-            "minimum": count * 3,
+            "minimum": count * (
+                4 if settings.no_harm_gate_enabled else 3
+            ),
             "maximum_without_schema_retries": count
             * (
                 3
                 + 2 * settings.max_revision_rounds
                 + (1 if solver_fallback is not None else 0)
+                + (1 if settings.no_harm_gate_enabled else 0)
             ),
         },
         "models": {
@@ -273,6 +276,15 @@ def _dry_run_payload(config: LGAgentConfig, count: int) -> dict[str, Any]:
         "skip_verifier_on_deterministic_errors": (
             settings.skip_verifier_on_deterministic_errors
         ),
+        "no_harm_gate": {
+            "enabled": settings.no_harm_gate_enabled,
+            "anchor_max_tokens": settings.no_harm_anchor_max_tokens,
+            "closed_book_policy": "preserve_direct_anchor_on_disagreement",
+            "open_book_override": (
+                "require authoritative in-force full-text evidence for "
+                "every changed option"
+            ),
+        },
     }
 
 

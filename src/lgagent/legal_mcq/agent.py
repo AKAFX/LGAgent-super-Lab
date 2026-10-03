@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from threading import Lock
 from time import perf_counter
 from typing import Any, Callable, Mapping, Protocol, Sequence, TypeVar
@@ -26,6 +27,7 @@ from .decision import DecisionValidation, DecisionValidator, citations_for_decis
 from .models import (
     AnswerStatus,
     ControllerPlan,
+    DirectAnchorDecision,
     LegalAgentError,
     LegalAgentErrorCode,
     LegalAnswer,
@@ -38,6 +40,7 @@ from .models import (
     VerificationResult,
     compact_json,
 )
+from .no_harm import NoHarmGate, NoHarmGateResult
 from .parser import format_question, parse_request
 from .observability import redact_telemetry, response_telemetry
 from .skills import LegalSkillRegistry, SkillDescriptor
@@ -83,6 +86,12 @@ accepted=true 时其余数组和 note 必须为空；accepted=false 时必须给
 REVISION_PROMPT = """根据独立核验意见修订一次。必须重新输出完整 Solver v3 JSON，
 不得只输出改动，不得机械接受建议选项；需要基于题目、规则和逐项命题重新核验。"""
 
+DIRECT_ANCHOR_PROMPT = """你是独立的中国法律选择题答题模型。
+只依据原始题目作答，不使用 Controller、Verifier、检索或其他 Agent 的观点。
+严格识别题目要求选择正确项还是错误项。仅输出 direct-anchor-v1 JSON：
+{"protocol_version":"direct-anchor-v1","selected_options":["A"],"confidence":0.0}
+selected_options 不能为空，只能包含题目中的选项标签。"""
+
 
 class EvidenceProvider(Protocol):
     def __call__(
@@ -100,7 +109,7 @@ class LegalMCQPolicy:
     max_attempts: int = 2
     max_revision_rounds: int = 1
     model_call_timeout_seconds: float = 60.0
-    controller_call_timeout_seconds: float = 30.0
+    controller_call_timeout_seconds: float = 60.0
     solver_call_timeout_seconds: float = 70.0
     solver_fallback_timeout_seconds: float = 45.0
     verifier_call_timeout_seconds: float = 30.0
@@ -114,6 +123,8 @@ class LegalMCQPolicy:
     verifier_length_retry_tokens: int = 512
     auxiliary_reasoning_reserve_tokens: int = 1024
     skip_verifier_on_deterministic_errors: bool = True
+    no_harm_gate_enabled: bool = False
+    no_harm_anchor_max_tokens: int = 4096
     min_authority_level: int = 4
     prompt_version: str = PROMPT_VERSION
 
@@ -153,6 +164,8 @@ class LegalMCQPolicy:
             raise ValueError("reasoning reservations cannot be negative")
         if self.verifier_visible_output_tokens < 64:
             raise ValueError("verifier_visible_output_tokens must be at least 64")
+        if self.no_harm_anchor_max_tokens < 128:
+            raise ValueError("no_harm_anchor_max_tokens must be at least 128")
         if self.verifier_length_retry_tokens < self.verifier_visible_output_tokens:
             raise ValueError(
                 "verifier_length_retry_tokens cannot be smaller than "
@@ -252,6 +265,9 @@ class LegalMCQAgent:
         self.runtime_date_provider = runtime_date_provider
         self.solver_circuit_breaker = solver_circuit_breaker
         self.validator = DecisionValidator(
+            min_authority_level=self.policy.min_authority_level
+        )
+        self.no_harm_gate = NoHarmGate(
             min_authority_level=self.policy.min_authority_level
         )
 
@@ -1073,6 +1089,54 @@ class LegalMCQAgent:
             },
         )
 
+    @staticmethod
+    def _anchor_errors(
+        parsed: ParsedLegalQuestion,
+        anchor: DirectAnchorDecision,
+    ) -> tuple[str, ...]:
+        errors: list[str] = []
+        known = set(parsed.option_labels)
+        selected = anchor.selected_options
+        if not set(selected).issubset(known):
+            errors.append("NO_HARM_ANCHOR_UNKNOWN_OPTION")
+        if (
+            parsed.request.question_type.value == "single_choice"
+            and len(selected) != 1
+        ):
+            errors.append("NO_HARM_ANCHOR_CARDINALITY")
+        if (
+            parsed.request.question_type.value == "multiple_choice"
+            and not selected
+        ):
+            errors.append("NO_HARM_ANCHOR_EMPTY")
+        return tuple(errors)
+
+    @staticmethod
+    def _no_harm_rejection(
+        gate: NoHarmGateResult,
+    ) -> VerificationResult:
+        explanation = (
+            "No-harm gate preserved the independent Direct anchor because "
+            f"{gate.reason}."
+        )
+        return VerificationResult(
+            accepted=False,
+            error_codes=("NO_HARM_ANCHOR_PRESERVED",),
+            challenged_options=gate.candidate_selected_options,
+            explanation=explanation,
+            suggested_selected_options=gate.anchor_selected_options,
+            raw={
+                "protocol_version": "deterministic-no-harm-v1",
+                "accepted": False,
+                "error_codes": ["NO_HARM_ANCHOR_PRESERVED"],
+                "challenged_options": list(gate.candidate_selected_options),
+                "suggested_selected_options": list(
+                    gate.anchor_selected_options
+                ),
+                "note": explanation,
+            },
+        )
+
     def solve(
         self,
         request: LegalQuestionRequest,
@@ -1125,6 +1189,9 @@ class LegalMCQAgent:
         )
         skill_context = [skill.prompt_payload() for skill in loaded_skills]
         question_text = format_question(parsed.request)
+        operational_warnings: list[str] = []
+        direct_anchor: DirectAnchorDecision | None = None
+        no_harm_gate_result: NoHarmGateResult | None = None
         controller_response_format = (
             None if self.policy.controller_structured_output_mode == "prompt_only"
             else ControllerPlan.response_format(parsed.option_labels)
@@ -1138,6 +1205,9 @@ class LegalMCQAgent:
             None
             if self.policy.verifier_structured_output_mode == "prompt_only"
             else VerificationResult.response_format(parsed.option_labels)
+        )
+        anchor_response_format = DirectAnchorDecision.response_format(
+            parsed.option_labels
         )
         solver_schema_tokens = (
             estimate_message_tokens(
@@ -1200,6 +1270,71 @@ class LegalMCQAgent:
             if revision_enabled
             else 0
         )
+
+        if self.policy.no_harm_gate_enabled:
+            anchor_tokens = min(
+                self.solver_config.max_tokens,
+                self.policy.no_harm_anchor_max_tokens,
+            )
+            downstream_calls = 1 + max(
+                2 + optional_revision_calls,
+                3 if self.solver_fallback_config is not None else 2,
+            )
+            downstream_tokens = (
+                self.controller_config.max_tokens
+                + self.policy.auxiliary_reasoning_reserve_tokens
+                + solver_reserved_tokens
+                + fallback_reserved_tokens
+                + verifier_tokens
+                + optional_revision_tokens
+            )
+            try:
+                _, direct_anchor = self._invoke(
+                    model_client=self.solver_model,
+                    config=self.solver_config,
+                    agent="legal_mcq_direct_anchor",
+                    messages=(
+                        ChatMessage("system", DIRECT_ANCHOR_PROMPT),
+                        ChatMessage("user", question_text),
+                    ),
+                    schema=DirectAnchorDecision,
+                    trace=run_trace,
+                    max_tokens=anchor_tokens,
+                    reserve_calls_after=downstream_calls,
+                    reserve_tokens_after=downstream_tokens,
+                    response_format=anchor_response_format,
+                    visible_output_tokens=256,
+                    call_timeout_seconds=self.policy.solver_call_timeout_seconds,
+                    max_attempts_override=1,
+                    retry_on_timeout=False,
+                )
+                anchor_errors = self._anchor_errors(parsed, direct_anchor)
+                if anchor_errors:
+                    operational_warnings.extend(anchor_errors)
+                    run_trace.add_route(
+                        "legal-mcq-no-harm-anchor-invalid",
+                        "Direct anchor failed deterministic option validation",
+                        {"error_codes": list(anchor_errors)},
+                    )
+                    direct_anchor = None
+                else:
+                    run_trace.add_route(
+                        "legal-mcq-no-harm-anchor-ready",
+                        "independent Direct anchor captured before Controller",
+                        {
+                            "selected_options": list(
+                                direct_anchor.selected_options
+                            ),
+                            "confidence": direct_anchor.confidence,
+                        },
+                    )
+            except (LegalAgentError, BudgetExceededError) as exc:
+                operational_warnings.append("NO_HARM_ANCHOR_UNAVAILABLE")
+                run_trace.add_route(
+                    "legal-mcq-no-harm-anchor-unavailable",
+                    "Direct anchor failed open; continuing the existing chain",
+                    {"error_type": type(exc).__name__},
+                )
 
         _, plan = self._invoke(
             model_client=self.controller_model,
@@ -1364,7 +1499,6 @@ class LegalMCQAgent:
             effective_mode=effective_mode,
         )
         revision_count = 0
-        operational_warnings: list[str] = []
         revision_allowed = (
             bool(self.policy.max_revision_rounds)
             and not solver_fallback_used
@@ -1524,6 +1658,58 @@ class LegalMCQAgent:
                         },
                     )
 
+        candidate_validation_valid = validation.valid
+        candidate_validation_error_codes = validation.error_codes
+        candidate_verifier_accepted = verification.accepted
+        candidate_verifier_error_codes = verification.error_codes
+        final_selected_options = decision.selected_options
+        final_rationale = decision.rationale
+        final_option_assessments = decision.option_assessments
+        final_confidence = decision.confidence
+        if self.policy.no_harm_gate_enabled and direct_anchor is not None:
+            no_harm_gate_result = self.no_harm_gate.evaluate(
+                anchor=direct_anchor,
+                candidate=decision,
+                evidence=evidence,
+                effective_mode=effective_mode,
+                as_of_date=parsed.request.as_of_date or date.today(),
+                candidate_valid=candidate_validation_valid,
+                verifier_accepted=candidate_verifier_accepted,
+            )
+            run_trace.add_route(
+                f"legal-mcq-no-harm-{no_harm_gate_result.action}",
+                no_harm_gate_result.reason,
+                {
+                    "anchor_selected_options": list(
+                        no_harm_gate_result.anchor_selected_options
+                    ),
+                    "candidate_selected_options": list(
+                        no_harm_gate_result.candidate_selected_options
+                    ),
+                    "authoritative_evidence_ids": list(
+                        no_harm_gate_result.authoritative_evidence_ids
+                    ),
+                    "candidate_validation_valid": candidate_validation_valid,
+                    "candidate_validation_error_codes": list(
+                        candidate_validation_error_codes
+                    ),
+                    "candidate_verifier_accepted": candidate_verifier_accepted,
+                    "candidate_verifier_error_codes": list(
+                        candidate_verifier_error_codes
+                    ),
+                },
+            )
+            if no_harm_gate_result.preserve_anchor:
+                final_selected_options = direct_anchor.selected_options
+                final_rationale = (
+                    "独立 Direct 锚点被保留；结构化链路提出了不同答案，但未提供"
+                    "满足 no-harm 覆盖条件的权威有效全文证据。"
+                )
+                final_option_assessments = ()
+                final_confidence = direct_anchor.confidence
+                verification = self._no_harm_rejection(no_harm_gate_result)
+                operational_warnings.append("NO_HARM_ANCHOR_PRESERVED")
+
         needs_review = not verification.accepted or not validation.valid
         warnings = tuple(
             dict.fromkeys(
@@ -1537,20 +1723,26 @@ class LegalMCQAgent:
         )
         citations = (
             citations_for_decision(decision, evidence)
-            if effective_mode is SolveMode.OPEN_BOOK
+            if (
+                effective_mode is SolveMode.OPEN_BOOK
+                and (
+                    no_harm_gate_result is None
+                    or not no_harm_gate_result.preserve_anchor
+                )
+            )
             else ()
         )
         answer = LegalAnswer(
             task_id=uuid4().hex,
             question_id=request.question_id,
             status=AnswerStatus.PARTIAL if needs_review else AnswerStatus.COMPLETED,
-            selected_options=decision.selected_options,
-            concise_answer="、".join(decision.selected_options),
-            rationale=decision.rationale,
-            option_assessments=decision.option_assessments,
+            selected_options=final_selected_options,
+            concise_answer="、".join(final_selected_options),
+            rationale=final_rationale,
+            option_assessments=final_option_assessments,
             citations=citations,
             evidence_mode=effective_mode.value,
-            confidence=decision.confidence,
+            confidence=final_confidence,
             needs_review=needs_review,
             warnings=warnings,
             trace_id=run_trace.run_id,
@@ -1562,6 +1754,11 @@ class LegalMCQAgent:
                 "status": answer.status.value,
                 "revision_count": revision_count,
                 "selected_option_count": len(answer.selected_options),
+                "no_harm_action": (
+                    no_harm_gate_result.action
+                    if no_harm_gate_result is not None
+                    else "disabled_or_unavailable"
+                ),
             },
         )
         return LegalMCQRunResult(
@@ -1572,6 +1769,32 @@ class LegalMCQAgent:
             verification=verification,
             revision_count=revision_count,
             prompt_version=self.policy.prompt_version,
+            direct_anchor=direct_anchor,
+            no_harm_gate=(
+                {
+                    "action": no_harm_gate_result.action,
+                    "anchor_selected_options": list(
+                        no_harm_gate_result.anchor_selected_options
+                    ),
+                    "candidate_selected_options": list(
+                        no_harm_gate_result.candidate_selected_options
+                    ),
+                    "authoritative_evidence_ids": list(
+                        no_harm_gate_result.authoritative_evidence_ids
+                    ),
+                    "candidate_validation_valid": candidate_validation_valid,
+                    "candidate_validation_error_codes": list(
+                        candidate_validation_error_codes
+                    ),
+                    "candidate_verifier_accepted": candidate_verifier_accepted,
+                    "candidate_verifier_error_codes": list(
+                        candidate_verifier_error_codes
+                    ),
+                    "reason": no_harm_gate_result.reason,
+                }
+                if no_harm_gate_result is not None
+                else {}
+            ),
             skill_versions={
                 skill.name: skill.version for skill in loaded_skills
             },

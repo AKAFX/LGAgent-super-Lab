@@ -176,7 +176,7 @@ ID 127 的推荐链路完成但与数据标签不一致；ID 156 的 GPT 输出�
 - Qwen3.7 Flash Controller v3 / Verifier v2：成功；
 - fallback 后 Verifier length-retry 预算回归：通过；
 - 全仓离线测试：`321 passed`；
-- 当前冻结 ID：`1931b3df9f45caf8f1c3ddc8`。
+- 当前冻结 ID：`d3175602655a56632c3d1bb3`。
 
 推荐链路 ID 127 返回 `completed`，但预测 B 与数据标签 A 不一致。因此本轮
 结论仅为模型和协议兼容性通过，不是准确率提升结论。

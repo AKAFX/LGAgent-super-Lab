@@ -162,6 +162,6 @@ bypass、Verifier length、端到端 completed 和全部分母准确率。
 
 前沿模型升级后的最终离线回归为 `321 passed`，仅一条第三方 Authlib
 弃用警告；compileall 与 `git diff --check` 通过。新冻结 ID 为
-`1931b3df9f45caf8f1c3ddc8`，旧 ID `64161b2c27f126a3ffe6d73c`
+`d3175602655a56632c3d1bb3`，旧 ID `1931b3df9f45caf8f1c3ddc8`
 已归档。v4 初始实现未发起供应商请求；后续真实 fallback 与题 259 重放见
 `legal_mcq_fallback_provider_validation_20260912.md`。

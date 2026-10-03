@@ -120,6 +120,6 @@ prompt-only Schema 降级。这证明已观察到的 Claim 跨选项划分故障
   `output/legal_mcq/fallback-fault-dev5-20260912-seed20260912/validation.summary.json`
 - Controller v3 题 259 重放：
   `output/legal_mcq/claim-binding-q259-20260912/`
-- 当前冻结 ID：`1931b3df9f45caf8f1c3ddc8`
+- 当前冻结 ID：`d3175602655a56632c3d1bb3`
 
 所有调用日志均经过凭据脱敏，未写入 API key。

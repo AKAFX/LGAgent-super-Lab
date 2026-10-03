@@ -22,6 +22,7 @@ SOLVER_PROTOCOL_V2_VERSION = "solver-v2"
 CONTROLLER_PROTOCOL_VERSION = "controller-v3"
 CONTROLLER_PROTOCOL_V2_VERSION = "controller-v2"
 VERIFIER_PROTOCOL_VERSION = "verifier-v2"
+DIRECT_ANCHOR_PROTOCOL_VERSION = "direct-anchor-v1"
 
 
 class SolveMode(str, Enum):
@@ -619,6 +620,77 @@ class IssueAnalysis:
 
 
 @dataclass(frozen=True)
+class DirectAnchorDecision:
+    selected_options: tuple[str, ...]
+    confidence: float
+    raw: Mapping[str, Any] = field(repr=False)
+
+    @staticmethod
+    def response_format(option_labels: tuple[str, ...]) -> dict[str, Any]:
+        properties = {
+            "protocol_version": {
+                "type": "string",
+                "enum": [DIRECT_ANCHOR_PROTOCOL_VERSION],
+            },
+            "selected_options": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": list(option_labels),
+                },
+            },
+            "confidence": {"type": "number"},
+        }
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "legal_mcq_direct_anchor_v1",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": properties,
+                    "required": list(properties),
+                },
+            },
+        }
+
+    @classmethod
+    def from_text(cls, text: str) -> "DirectAnchorDecision":
+        source = extract_json_object(text)
+        _exact_keys(
+            source,
+            {"protocol_version", "selected_options", "confidence"},
+            "direct-anchor-v1",
+            stage="legal_mcq_direct_anchor",
+        )
+        if source["protocol_version"] != DIRECT_ANCHOR_PROTOCOL_VERSION:
+            raise StructuredOutputError(
+                "legal_mcq_direct_anchor",
+                f"protocol_version must be {DIRECT_ANCHOR_PROTOCOL_VERSION}",
+            )
+        if not isinstance(source["selected_options"], list):
+            raise StructuredOutputError(
+                "legal_mcq_direct_anchor",
+                "selected_options must be an array",
+            )
+        selected = tuple(
+            _label(item, "selected_options")
+            for item in source["selected_options"]
+        )
+        if not selected or len(selected) != len(set(selected)):
+            raise StructuredOutputError(
+                "legal_mcq_direct_anchor",
+                "selected_options must be unique and non-empty",
+            )
+        return cls(
+            selected_options=selected,
+            confidence=_confidence(source["confidence"], "confidence"),
+            raw=source,
+        )
+
+
+@dataclass(frozen=True)
 class SolverDecision:
     selected_options: tuple[str, ...]
     option_assessments: tuple[OptionAssessment, ...]
@@ -1194,6 +1266,8 @@ class LegalMCQRunResult:
     verification: VerificationResult
     revision_count: int
     prompt_version: str
+    direct_anchor: DirectAnchorDecision | None = None
+    no_harm_gate: Mapping[str, Any] = field(default_factory=dict)
     skill_versions: Mapping[str, str] = field(default_factory=dict)
     trace: RunTrace | None = field(default=None, repr=False, compare=False)
     execution_budget: Mapping[str, Any] = field(default_factory=dict)
@@ -1207,6 +1281,12 @@ class LegalMCQRunResult:
             "verification": to_jsonable(self.verification),
             "revision_count": self.revision_count,
             "prompt_version": self.prompt_version,
+            "direct_anchor": (
+                to_jsonable(self.direct_anchor)
+                if self.direct_anchor is not None
+                else None
+            ),
+            "no_harm_gate": dict(self.no_harm_gate),
             "skill_versions": dict(self.skill_versions),
             "golden_leakage_incidents": 0,
             "trace": self.trace.as_dict() if self.trace is not None else {},

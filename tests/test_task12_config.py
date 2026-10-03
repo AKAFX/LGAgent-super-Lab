@@ -293,6 +293,7 @@ class TypedConfigTest(ConfigFileMixin, unittest.TestCase):
         self.assertEqual(legal.solver_fallback_model.reasoning_effort, "medium")
         self.assertEqual(legal.max_total_tokens, 65536)
         self.assertEqual(legal.max_wall_time_seconds, 360)
+        self.assertEqual(legal.controller_call_timeout_seconds, 60)
 
 
 class StrictValidationTest(ConfigFileMixin, unittest.TestCase):

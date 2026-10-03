@@ -32,6 +32,8 @@ from .models import (
     CONTROLLER_PROTOCOL_VERSION,
     CONTROLLER_PROTOCOL_V2_VERSION,
     ControllerPlan,
+    DIRECT_ANCHOR_PROTOCOL_VERSION,
+    DirectAnchorDecision,
     EvaluationCase,
     EvaluationOracle,
     LegalAgentError,
@@ -52,6 +54,7 @@ from .models import (
     SolverDecision,
     VerificationResult,
 )
+from .no_harm import NoHarmGate, NoHarmGateResult
 from .parser import format_question, parse_question_text, parse_request
 from .skills import LegalSkillRegistry, SkillDescriptor
 
@@ -63,8 +66,10 @@ __all__ = [
     "CONTROLLER_PROTOCOL_VERSION",
     "CONTROLLER_PROTOCOL_V2_VERSION",
     "ControllerPlan",
+    "DIRECT_ANCHOR_PROTOCOL_VERSION",
     "DecisionValidation",
     "DecisionValidator",
+    "DirectAnchorDecision",
     "EvaluationCase",
     "EvaluationOracle",
     "EvidenceProvider",
@@ -85,6 +90,8 @@ __all__ = [
     "LegalEvidenceAdapterError",
     "LeakGuard",
     "OptionAssessment",
+    "NoHarmGate",
+    "NoHarmGateResult",
     "OathAuditedEvidenceProvider",
     "PROMPT_VERSION",
     "ParsedLegalQuestion",

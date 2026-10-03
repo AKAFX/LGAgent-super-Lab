@@ -223,6 +223,10 @@ class LGAgentPlusRunner:
                     skip_verifier_on_deterministic_errors=(
                         settings.skip_verifier_on_deterministic_errors
                     ),
+                    no_harm_gate_enabled=settings.no_harm_gate_enabled,
+                    no_harm_anchor_max_tokens=(
+                        settings.no_harm_anchor_max_tokens
+                    ),
                     min_authority_level=settings.min_authority_level,
                     prompt_version=settings.prompt_version,
                 ),
