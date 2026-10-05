@@ -1,0 +1,464 @@
+{
+  "anchor_health": {
+    "evaluated": 83,
+    "invalid_cardinality_on_returned": 12,
+    "matched": 76,
+    "preserve_anchor": 7,
+    "unavailable_error_on_returned": 2,
+    "unavailable_on_returned": 14
+  },
+  "artifacts": {
+    "calls_sha256": "cfbf9b2e9e540f6a7317b811f7ececbf810420c6773ae5172240a626792931a7",
+    "pre_run_manifest_sha256": "a2c5c382922666f9aa69cb21588921bb9dd01ef73842e9f39f50ab0af137ab73",
+    "results_sha256": "795445a09a9a4360017afd673b7d3c7497b981008bf3d016a2782d4a6b9a9612",
+    "run_summary_sha256": "3dedbd9ecf65224bbef70fc2018cb7725ce93c6e9b8fb5883866e26df2d6884f"
+  },
+  "dataset": "data/LexGenius.jsonl",
+  "domain_results": {
+    "Judicial Practice": {
+      "chain": 5,
+      "final": 5,
+      "prior": 5,
+      "total": 14,
+      "web": 4
+    },
+    "Law and Society": {
+      "chain": 5,
+      "final": 6,
+      "prior": 9,
+      "total": 14,
+      "web": 9
+    },
+    "Legal Application": {
+      "chain": 6,
+      "final": 6,
+      "prior": 6,
+      "total": 14,
+      "web": 5
+    },
+    "Legal Ethics": {
+      "chain": 11,
+      "final": 11,
+      "prior": 9,
+      "total": 14,
+      "web": 9
+    },
+    "Legal Language": {
+      "chain": 10,
+      "final": 10,
+      "prior": 8,
+      "total": 14,
+      "web": 8
+    },
+    "Legal Reasoning": {
+      "chain": 10,
+      "final": 10,
+      "prior": 8,
+      "total": 15,
+      "web": 7
+    },
+    "Legal Understanding": {
+      "chain": 11,
+      "final": 12,
+      "prior": 7,
+      "total": 15,
+      "web": 7
+    }
+  },
+  "execution": {
+    "batch_elapsed_seconds": 1878.250230750069,
+    "call_agents": {
+      "legal_mcq_controller": 100,
+      "legal_mcq_direct_anchor": 100,
+      "legal_mcq_solver": 105,
+      "legal_mcq_solver_fallback": 1,
+      "legal_mcq_solver_revision": 33,
+      "legal_mcq_verifier_1": 90,
+      "legal_mcq_verifier_2": 25
+    },
+    "call_outcomes": {
+      "deadline_exceeded": 4,
+      "schema_error": 19,
+      "success": 431
+    },
+    "failed": 3,
+    "gate_actions": {
+      "matched": 76,
+      "preserve_anchor": 7,
+      "unavailable": 14
+    },
+    "item_latency_seconds": {
+      "max": 262.2363634589128,
+      "mean": 72.5585757345846,
+      "median": 52.8290854585357,
+      "p95": 168.65496291592717
+    },
+    "logical_calls": 454,
+    "models": {
+      "Qwen/Qwen3.7-Flash": 215,
+      "Qwen/Qwen3.8-Max-0902": 1,
+      "gpt-5.6-sol": 238
+    },
+    "reasoning_tokens": 428978,
+    "returned": 97,
+    "revisions": {
+      "0": 72,
+      "1": 25
+    },
+    "statuses": {
+      "completed": 77,
+      "partial": 20
+    },
+    "usage": {
+      "completion_tokens": 505713,
+      "prompt_tokens": 446505,
+      "total_tokens": 952218
+    }
+  },
+  "failed_cases_in_denominator": true,
+  "failures": [
+    {
+      "dataset_index": 14,
+      "error_type": "LegalAgentError",
+      "failed_agent": "legal_mcq_solver",
+      "golden_answers": [
+        "C"
+      ],
+      "message": "model_schema_error: legal_mcq: selected_options must be one uppercase option label",
+      "prior_correct": true,
+      "prior_prediction": "C",
+      "question_id": "14"
+    },
+    {
+      "dataset_index": 54,
+      "error_type": "LegalAgentError",
+      "failed_agent": "legal_mcq_solver_revision",
+      "golden_answers": [
+        "D"
+      ],
+      "message": "model_schema_error: legal_mcq_solver: selected_options cannot be empty",
+      "prior_correct": true,
+      "prior_prediction": "D",
+      "question_id": "54"
+    },
+    {
+      "dataset_index": 75,
+      "error_type": "BudgetExceededError",
+      "failed_agent": "legal_mcq_controller",
+      "golden_answers": [
+        "A"
+      ],
+      "message": "execution budget exhausted: max_seconds",
+      "prior_correct": false,
+      "prior_prediction": "B",
+      "question_id": "75"
+    }
+  ],
+  "gate_effect": {
+    "changed_count": 7,
+    "corrected": 3,
+    "harmed": 1,
+    "items": [
+      {
+        "action": "preserve_anchor",
+        "chain_correct": false,
+        "chain_prediction": [
+          "A"
+        ],
+        "dataset_index": 38,
+        "final_correct": false,
+        "final_prediction": [
+          "C"
+        ],
+        "golden_answers": [
+          "D"
+        ],
+        "question_id": "38"
+      },
+      {
+        "action": "preserve_anchor",
+        "chain_correct": false,
+        "chain_prediction": [
+          "A"
+        ],
+        "dataset_index": 49,
+        "final_correct": true,
+        "final_prediction": [
+          "C"
+        ],
+        "golden_answers": [
+          "C"
+        ],
+        "question_id": "49"
+      },
+      {
+        "action": "preserve_anchor",
+        "chain_correct": false,
+        "chain_prediction": [
+          "B"
+        ],
+        "dataset_index": 53,
+        "final_correct": true,
+        "final_prediction": [
+          "C"
+        ],
+        "golden_answers": [
+          "C"
+        ],
+        "question_id": "53"
+      },
+      {
+        "action": "preserve_anchor",
+        "chain_correct": false,
+        "chain_prediction": [
+          "B"
+        ],
+        "dataset_index": 56,
+        "final_correct": false,
+        "final_prediction": [
+          "A"
+        ],
+        "golden_answers": [
+          "C"
+        ],
+        "question_id": "56"
+      },
+      {
+        "action": "preserve_anchor",
+        "chain_correct": true,
+        "chain_prediction": [
+          "C"
+        ],
+        "dataset_index": 81,
+        "final_correct": false,
+        "final_prediction": [
+          "D"
+        ],
+        "golden_answers": [
+          "C"
+        ],
+        "question_id": "81"
+      },
+      {
+        "action": "preserve_anchor",
+        "chain_correct": false,
+        "chain_prediction": [
+          "D"
+        ],
+        "dataset_index": 82,
+        "final_correct": true,
+        "final_prediction": [
+          "B"
+        ],
+        "golden_answers": [
+          "B"
+        ],
+        "question_id": "82"
+      },
+      {
+        "action": "preserve_anchor",
+        "chain_correct": false,
+        "chain_prediction": [
+          "D"
+        ],
+        "dataset_index": 99,
+        "final_correct": false,
+        "final_prediction": [
+          "A"
+        ],
+        "golden_answers": [
+          "C"
+        ],
+        "question_id": "99"
+      }
+    ],
+    "neutral": 3
+  },
+  "historical_cost_comparison": {
+    "call_delta": -249,
+    "current_calls": 454,
+    "current_total_tokens": 952218,
+    "historical_calls": 703,
+    "historical_total_tokens": 1005917,
+    "pricing_comparable": false,
+    "token_delta": -53699
+  },
+  "interpretation": {
+    "accuracy_gain_vs_historical_original_percentage_points": 8.0,
+    "default_enable_recommended": false,
+    "gate_gain_vs_same_run_chain_percentage_points": 2.0,
+    "model_change_confounds_historical_comparison": true,
+    "numerically_highest": "current_no_harm_final",
+    "statistically_significant_at_0_05_vs_chain": false,
+    "statistically_significant_at_0_05_vs_historical_original": false
+  },
+  "methods": [
+    {
+      "accuracy": 0.6,
+      "correct": 60,
+      "name": "current_no_harm_final",
+      "total": 100,
+      "wilson_95": [
+        0.5020025867910618,
+        0.6905987135675411
+      ]
+    },
+    {
+      "accuracy": 0.58,
+      "correct": 58,
+      "name": "same_run_chain_candidate",
+      "total": 100,
+      "wilson_95": [
+        0.4820648670304296,
+        0.6720161732564526
+      ]
+    },
+    {
+      "accuracy": 0.52,
+      "correct": 52,
+      "name": "historical_qwen3_8b_original",
+      "total": 100,
+      "wilson_95": [
+        0.4231657776522397,
+        0.615354482419481
+      ]
+    },
+    {
+      "accuracy": 0.49,
+      "correct": 49,
+      "name": "historical_qwen3_8b_web",
+      "total": 100,
+      "wilson_95": [
+        0.3942199893044113,
+        0.5865198806597283
+      ]
+    }
+  ],
+  "paired": {
+    "chain_vs_historical_original": {
+      "exact_mcnemar_p_two_sided": 0.34492845088243484,
+      "left_correct": 58,
+      "left_only_correct": 17,
+      "net_correct": 6,
+      "right_correct": 52,
+      "right_only_correct": 11
+    },
+    "final_vs_chain": {
+      "exact_mcnemar_p_two_sided": 0.625,
+      "left_correct": 60,
+      "left_only_correct": 3,
+      "net_correct": 2,
+      "right_correct": 58,
+      "right_only_correct": 1
+    },
+    "final_vs_historical_original": {
+      "exact_mcnemar_p_two_sided": 0.1849333420395851,
+      "left_correct": 60,
+      "left_only_correct": 18,
+      "net_correct": 8,
+      "right_correct": 52,
+      "right_only_correct": 10
+    },
+    "final_vs_historical_web": {
+      "exact_mcnemar_p_two_sided": 0.052238985896110535,
+      "left_correct": 60,
+      "left_only_correct": 19,
+      "net_correct": 11,
+      "right_correct": 49,
+      "right_only_correct": 8
+    }
+  },
+  "rerun_failures": false,
+  "schema_version": 1,
+  "selection": "first_100_interleaved_records",
+  "top_warnings": [
+    [
+      "year_only_date_assumed_end",
+      22
+    ],
+    [
+      "NO_HARM_ANCHOR_CARDINALITY",
+      12
+    ],
+    [
+      "multiple_dates_first_assumed",
+      8
+    ],
+    [
+      "NO_HARM_ANCHOR_PRESERVED",
+      7
+    ],
+    [
+      "INCORRECT_LAW_CITATION",
+      4
+    ],
+    [
+      "SINGLE_CHOICE_CARDINALITY",
+      2
+    ],
+    [
+      "AMBIGUOUS_OPTION_VERDICTS",
+      2
+    ],
+    [
+      "NO_HARM_ANCHOR_UNAVAILABLE",
+      2
+    ],
+    [
+      "FACTUAL_ERROR",
+      1
+    ],
+    [
+      "TIMELINE_MISMATCH",
+      1
+    ],
+    [
+      "INCORRECT_OPTION",
+      1
+    ],
+    [
+      "INCORRECT_STATUTORY_CITATION",
+      1
+    ],
+    [
+      "INVALID_LAW_REFERENCE",
+      1
+    ],
+    [
+      "FACTUAL_ERROR_IN_OPTION_D",
+      1
+    ],
+    [
+      "MISCLASSIFICATION",
+      1
+    ],
+    [
+      "LOGICAL_CONTRADICTION_IN_REASONING",
+      1
+    ],
+    [
+      "MISLEADING_OPTION_CONTENT",
+      1
+    ],
+    [
+      "COMPOUND_OPTION_LEAK",
+      1
+    ],
+    [
+      "possible_historical_law_without_date",
+      1
+    ],
+    [
+      "INCORRECT_ANSWER",
+      1
+    ],
+    [
+      "MISLEADING_EXPLANATION",
+      1
+    ],
+    [
+      "MISINTERPRETATION_OF_QUESTION_TYPE",
+      1
+    ]
+  ]
+}
